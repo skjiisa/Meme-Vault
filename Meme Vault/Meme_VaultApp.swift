@@ -6,12 +6,21 @@
 //
 
 import SwiftUI
+import SwiftData
 
 @main
 struct Meme_VaultApp: App {
+    @StateObject private var library = PhotoLibrary.shared
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContextListView()
+                .environmentObject(library)
         }
+        .modelContainer(for: [
+            OrgContext.self,
+            PhotoSkip.self,
+            PendingDelete.self,
+        ])
     }
 }

@@ -2,23 +2,15 @@
 //  ContentView.swift
 //  Meme Vault
 //
-//  Created by Elaine Lyons on 5/4/26.
+//  The root view for Meme Vault is `ContextListView` — see Features/ContextList/.
+//  This file is kept as a SwiftUI preview entry point.
 //
 
 import SwiftUI
-
-struct ContentView: View {
-    var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
-        }
-        .padding()
-    }
-}
+import SwiftData
 
 #Preview {
-    ContentView()
+    ContextListView()
+        .environmentObject(PhotoLibrary.shared)
+        .modelContainer(for: AppSchema.models, inMemory: true)
 }
