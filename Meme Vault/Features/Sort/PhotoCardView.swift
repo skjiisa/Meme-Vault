@@ -15,6 +15,8 @@ struct PhotoCardView: View {
     let onSwipeLeft: () -> Void          // delete
     let onSwipeRight: () -> Void         // skip
 
+    @Environment(\.displayScale) private var displayScale
+
     @State private var image: UIImage?
     @State private var dragOffset: CGSize = .zero
     @State private var isLoading = true
@@ -66,7 +68,7 @@ struct PhotoCardView: View {
                     }
             )
             .task(id: asset.localIdentifier) {
-                await loadImage(targetSize: geo.size.applying(.init(scaleX: UIScreen.main.scale, y: UIScreen.main.scale)))
+                await loadImage(targetSize: geo.size.applying(.init(scaleX: displayScale, y: displayScale)))
             }
             .onChange(of: asset.localIdentifier) { _, _ in
                 dragOffset = .zero

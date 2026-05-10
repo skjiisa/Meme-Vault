@@ -14,7 +14,7 @@ struct Meme_VaultApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContextListView()
+            RootView()
                 .environmentObject(library)
         }
         .modelContainer(for: [

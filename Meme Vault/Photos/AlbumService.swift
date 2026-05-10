@@ -148,6 +148,30 @@ enum AlbumService {
         }
     }
 
+    // MARK: - Debug
+
+    #if DEBUG
+    /// Removes all assets from all user-created albums. Does NOT delete the
+    /// photos or the albums — just clears membership. Only available in debug
+    /// builds on the simulator.
+    static func debugRemoveAllAssetsFromAllAlbums() async throws {
+        guard ProcessInfo.processInfo.environment["SIMULATOR_DEVICE_NAME"] != nil else {
+            print("debugRemoveAllAssetsFromAllAlbums: Refused — not running in a simulator.")
+            return
+        }
+        let albums = listUserAlbums()
+        for albumInfo in albums {
+            guard let collection = collection(for: albumInfo.id) else { continue }
+            let assets = PHAsset.fetchAssets(in: collection, options: nil)
+            guard assets.count > 0 else { continue }
+            try await performChanges {
+                guard let req = PHAssetCollectionChangeRequest(for: collection) else { return }
+                req.removeAssets(assets)
+            }
+        }
+    }
+    #endif
+
     // MARK: - Asset lookup
 
     static func asset(for localID: String) -> PHAsset? {
