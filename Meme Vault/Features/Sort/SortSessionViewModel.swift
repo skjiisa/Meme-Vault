@@ -100,12 +100,12 @@ final class SortSessionViewModel {
         self.queue = remaining
         self.index = 0
         self.isLoading = false
-        await refreshCurrent()
+        refreshCurrent()
     }
 
     // MARK: - Current asset
 
-    private func refreshCurrent() async {
+    private func refreshCurrent() {
         guard index < queue.count else {
             currentAsset = nil
             memberships = []
@@ -124,6 +124,19 @@ final class SortSessionViewModel {
     var isSatisfied: Bool {
         guard !memberships.isEmpty else { return false }
         return memberships.contains(where: \.isMember)
+    }
+
+    /// Local ID of the asset currently shown — drives the carousel's page.
+    var currentAssetID: String? {
+        index < queue.count ? queue[index] : nil
+    }
+
+    /// Jump to the asset with the given local ID. Called when the user pages
+    /// the carousel; no-op if the ID isn't in the queue or is already current.
+    func showAsset(id: String) {
+        guard let target = queue.firstIndex(of: id), target != index else { return }
+        index = target
+        refreshCurrent()
     }
 
     var progressText: String {
@@ -165,13 +178,13 @@ final class SortSessionViewModel {
         } else {
             index += 1
         }
-        await refreshCurrent()
+        refreshCurrent()
     }
 
     func back() async {
         guard index > 0 else { return }
         index -= 1
-        await refreshCurrent()
+        refreshCurrent()
     }
 
     /// Press "Next". If satisfied, drop from queue. Otherwise advance the
@@ -209,7 +222,7 @@ final class SortSessionViewModel {
         // Put it back in the queue at the current index.
         queue.insert(id, at: index)
         lastAction = nil
-        await refreshCurrent()
+        refreshCurrent()
     }
 
     // MARK: - Delete (queue)
@@ -234,7 +247,7 @@ final class SortSessionViewModel {
         }
         queue.insert(id, at: index)
         lastAction = nil
-        await refreshCurrent()
+        refreshCurrent()
     }
 
     // MARK: - PhotoKit change handling
@@ -242,13 +255,5 @@ final class SortSessionViewModel {
     /// Called when the photo library reports external changes. Rebuilds queue.
     func handleLibraryChange() async {
         await rebuildQueue()
-    }
-
-    // MARK: - Prefetch
-
-    /// Returns the next N assets to pre-cache.
-    func upcomingAssets(count: Int = 3) -> [PHAsset] {
-        let upcoming = queue.dropFirst(index + 1).prefix(count)
-        return AlbumService.assets(for: Array(upcoming))
     }
 }

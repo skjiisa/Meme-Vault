@@ -2,8 +2,11 @@
 //  PhotoCardView.swift
 //  Meme Vault
 //
-//  Renders a PHAsset as a swipeable card. Reports swipe direction back to the
-//  parent so the ViewModel can take action.
+//  Horizontally paged carousel over the sort queue. Backed by a SwiftUI
+//  `ScrollView` with view-aligned paging, so it scrolls with native physics
+//  (rubber-banding, deceleration, flick-through) and only realises the pages
+//  near the viewport via `LazyHStack` — fine for a queue of thousands. The
+//  centred page is two-way-bound to the view model through `currentID`.
 //
 
 import SwiftUI
@@ -11,108 +14,101 @@ import Photos
 import UIKit
 
 struct PhotoCardView: View {
-    let asset: PHAsset
-    let onSwipeLeft: () -> Void          // delete
-    let onSwipeRight: () -> Void         // skip
+    /// All asset local IDs in the queue, in display order.
+    let assetIDs: [String]
+    /// Local ID of the page currently centred. User swipes write to it;
+    /// programmatic changes (Next / Back buttons, undo) scroll the carousel.
+    @Binding var currentID: String?
 
     @Environment(\.displayScale) private var displayScale
 
-    @State private var image: UIImage?
-    @State private var dragOffset: CGSize = .zero
-    @State private var isLoading = true
-
-    private let swipeThreshold: CGFloat = 100
+    /// How many neighbours on each side of the visible page to keep pre-decoded.
+    private let prefetchAhead = 3
+    private let prefetchBehind = 1
 
     var body: some View {
         GeometryReader { geo in
-            ZStack {
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(Color(.secondarySystemBackground))
+            let pageSize = geo.size
+            let pixelSize = CGSize(width: pageSize.width * displayScale,
+                                   height: pageSize.height * displayScale)
 
+            ScrollView(.horizontal) {
+                LazyHStack(spacing: 0) {
+                    ForEach(assetIDs, id: \.self) { id in
+                        PhotoPage(assetID: id, targetSize: pixelSize)
+                            .frame(width: pageSize.width, height: pageSize.height)
+                    }
+                }
+                .scrollTargetLayout()
+            }
+            .scrollTargetBehavior(.viewAligned)
+            .scrollPosition(id: $currentID)
+            .scrollIndicators(.hidden)
+            .onAppear { updatePrefetchWindow(targetSize: pixelSize) }
+            .onChange(of: currentID) { _, _ in updatePrefetchWindow(targetSize: pixelSize) }
+            .onChange(of: assetIDs) { _, _ in updatePrefetchWindow(targetSize: pixelSize) }
+            .onDisappear { ImageLoader.shared.reset() }
+        }
+    }
+
+    private func updatePrefetchWindow(targetSize: CGSize) {
+        guard let id = currentID, let i = assetIDs.firstIndex(of: id) else {
+            ImageLoader.shared.setCacheWindow([], targetSize: targetSize)
+            return
+        }
+        let lower = max(0, i - prefetchBehind)
+        let upper = min(assetIDs.count - 1, i + prefetchAhead)
+        let windowIDs = Array(assetIDs[lower...upper])
+        ImageLoader.shared.setCacheWindow(AlbumService.assets(for: windowIDs), targetSize: targetSize)
+    }
+}
+
+// MARK: - Single page
+
+/// One page of the carousel: resolves its `PHAsset` lazily, then loads a
+/// display-quality image. Sizing is owned by the parent.
+private struct PhotoPage: View {
+    let assetID: String
+    let targetSize: CGSize
+
+    @State private var image: UIImage?
+    @State private var phase: Phase = .loading
+
+    private enum Phase { case loading, loaded, missing }
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(.secondarySystemBackground))
+
+            switch phase {
+            case .loaded:
                 if let image {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFit()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .clipShape(RoundedRectangle(cornerRadius: 16))
-                } else if isLoading {
-                    ProgressView()
                 }
-
-                // Swipe-direction overlays
-                overlayLabels(width: geo.size.width)
-            }
-            .offset(x: dragOffset.width, y: dragOffset.height * 0.3)
-            .rotationEffect(.degrees(Double(dragOffset.width / 20)))
-            .gesture(
-                DragGesture()
-                    .onChanged { value in
-                        dragOffset = value.translation
-                    }
-                    .onEnded { value in
-                        if value.translation.width < -swipeThreshold {
-                            withAnimation(.spring) {
-                                dragOffset = CGSize(width: -geo.size.width * 1.5, height: value.translation.height)
-                            }
-                            onSwipeLeft()
-                        } else if value.translation.width > swipeThreshold {
-                            withAnimation(.spring) {
-                                dragOffset = CGSize(width: geo.size.width * 1.5, height: value.translation.height)
-                            }
-                            onSwipeRight()
-                        } else {
-                            withAnimation(.spring) {
-                                dragOffset = .zero
-                            }
-                        }
-                    }
-            )
-            .task(id: asset.localIdentifier) {
-                await loadImage(targetSize: geo.size.applying(.init(scaleX: displayScale, y: displayScale)))
-            }
-            .onChange(of: asset.localIdentifier) { _, _ in
-                dragOffset = .zero
-                image = nil
-                isLoading = true
+            case .loading:
+                ProgressView()
+            case .missing:
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.largeTitle)
+                    .foregroundStyle(.secondary)
             }
         }
-    }
-
-    @ViewBuilder
-    private func overlayLabels(width: CGFloat) -> some View {
-        let progress = max(-1, min(1, dragOffset.width / width))
-
-        ZStack {
-            // Right swipe -> Skip
-            Text("SKIP")
-                .font(.system(size: 36, weight: .heavy))
-                .foregroundStyle(.green)
-                .padding(8)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8).stroke(.green, lineWidth: 4)
-                )
-                .rotationEffect(.degrees(-15))
-                .opacity(Double(max(0, progress) * 2))
-                .offset(x: -width / 4)
-
-            // Left swipe -> Delete
-            Text("DELETE")
-                .font(.system(size: 36, weight: .heavy))
-                .foregroundStyle(.red)
-                .padding(8)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8).stroke(.red, lineWidth: 4)
-                )
-                .rotationEffect(.degrees(15))
-                .opacity(Double(max(0, -progress) * 2))
-                .offset(x: width / 4)
+        .padding(.horizontal, 4)   // a hair of gutter between adjacent cards mid-swipe
+        .task(id: assetID) {
+            image = nil
+            phase = .loading
+            guard let asset = AlbumService.asset(for: assetID) else {
+                phase = .missing
+                return
+            }
+            let loaded = await ImageLoader.shared.loadDisplayImage(for: asset, targetSize: targetSize)
+            guard !Task.isCancelled else { return }
+            image = loaded
+            phase = (loaded == nil) ? .missing : .loaded
         }
-    }
-
-    private func loadImage(targetSize: CGSize) async {
-        isLoading = true
-        let img = await ImageLoader.shared.loadDisplayImage(for: asset, targetSize: targetSize)
-        self.image = img
-        self.isLoading = false
     }
 }

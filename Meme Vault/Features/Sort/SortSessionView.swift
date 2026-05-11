@@ -52,8 +52,8 @@ struct SortSessionView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if vm.queue.isEmpty {
             allDoneView
-        } else if let asset = vm.currentAsset {
-            sortContent(vm: vm, asset: asset)
+        } else if vm.currentAsset != nil {
+            sortContent(vm: vm)
         } else {
             ProgressView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -74,7 +74,7 @@ struct SortSessionView: View {
     // MARK: - Sort content
 
     @ViewBuilder
-    private func sortContent(vm: SortSessionViewModel, asset: PHAsset) -> some View {
+    private func sortContent(vm: SortSessionViewModel) -> some View {
         VStack(spacing: 12) {
             // Progress
             HStack {
@@ -90,23 +90,14 @@ struct SortSessionView: View {
             }
             .padding(.horizontal)
 
-            // Photo card
+            // Photo carousel
             PhotoCardView(
-                asset: asset,
-                onSwipeLeft: {
-                    Task {
-                        await vm.queueDelete()
-                        showToast()
-                    }
-                },
-                onSwipeRight: {
-                    Task {
-                        await vm.skip()
-                        showToast()
-                    }
-                }
+                assetIDs: vm.queue,
+                currentID: Binding(
+                    get: { vm.currentAssetID },
+                    set: { id in if let id { vm.showAsset(id: id) } }
+                )
             )
-            .frame(maxWidth: .infinity)
             .frame(height: 360)
             .padding(.horizontal)
 
