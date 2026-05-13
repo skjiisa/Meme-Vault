@@ -28,6 +28,7 @@ struct ContextEditorView: View {
 
     @State private var showingSourcePicker = false
     @State private var showingAlbumPicker = false
+    @State private var lastAutoName: String = ""
 
     /// Whether the context being edited is the default context.
     private var isDefaultContext: Bool {
@@ -42,6 +43,16 @@ struct ContextEditorView: View {
                     defaultContextSections
                 } else {
                     editableSections
+                }
+            }
+            .onChange(of: sourceAlbumLocalID) { _, newValue in
+                guard case .create = mode, sourceKind == .album else { return }
+                if let id = newValue,
+                   let title = AlbumService.collection(for: id)?.localizedTitle {
+                    if name.isEmpty || name == lastAutoName {
+                        name = title
+                        lastAutoName = title
+                    }
                 }
             }
             .navigationTitle(navTitle)
@@ -107,9 +118,6 @@ struct ContextEditorView: View {
 
     @ViewBuilder
     private var editableSections: some View {
-        Section("Name") {
-            TextField("Context name", text: $name)
-        }
         Section("Source") {
             Picker("Photos to sort", selection: $sourceKind) {
                 Text("All Photos").tag(SourceKind.allPhotos)
@@ -127,6 +135,9 @@ struct ContextEditorView: View {
                     }
                 }
             }
+        }
+        Section("Name") {
+            TextField("Context name", text: $name)
         }
         Section {
             if !albumSelection.isEmpty {

@@ -23,10 +23,34 @@ struct RootView: View {
     @State private var showingContextList = false
     @State private var showingDebugConfirm = false
     @State private var debugMessage: String?
+    @State private var selectedContext: OrgContext?
+    @State private var pendingContext: OrgContext?
 
-    /// The primary context to show: default first, otherwise the first available.
-    private var primaryContext: OrgContext? {
+    @AppStorage("startupContextUUID") private var startupContextUUID = ""
+    @AppStorage("lastUsedContextUUID") private var lastUsedContextUUID = ""
+
+    private var fallbackContext: OrgContext? {
         contexts.first { $0.isDefault } ?? contexts.first
+    }
+
+    /// The primary context to show, respecting the user's startup preference.
+    private var primaryContext: OrgContext? {
+        if startupContextUUID == "lastUsed" {
+            return contexts.first { $0.uuid.uuidString == lastUsedContextUUID } ?? fallbackContext
+        }
+        if !startupContextUUID.isEmpty {
+            return contexts.first { $0.uuid.uuidString == startupContextUUID } ?? fallbackContext
+        }
+        return fallbackContext
+    }
+
+    /// The context currently on screen: explicit selection, or the primary default.
+    private var displayedContext: OrgContext? {
+        if let selected = selectedContext,
+           contexts.contains(where: { $0.persistentModelID == selected.persistentModelID }) {
+            return selected
+        }
+        return primaryContext
     }
 
     var body: some View {
@@ -34,8 +58,9 @@ struct RootView: View {
             Group {
                 if !library.isAuthorized {
                     AuthorizationGateView()
-                } else if let ctx = primaryContext {
+                } else if let ctx = displayedContext {
                     SortSessionView(context: ctx)
+                        .id(ctx.persistentModelID)
                 } else {
                     // No contexts yet — will be created momentarily by .task
                     ProgressView("Setting up…")
@@ -77,8 +102,16 @@ struct RootView: View {
                 }
                 #endif
             }
-            .sheet(isPresented: $showingContextList) {
-                ContextListView()
+            .sheet(isPresented: $showingContextList, onDismiss: {
+                if let pending = pendingContext {
+                    selectedContext = pending
+                    pendingContext = nil
+                }
+            }) {
+                ContextListView(onSelect: { context in
+                    pendingContext = context
+                    showingContextList = false
+                })
             }
             .alert("Debug: Clear Album Membership", isPresented: $showingDebugConfirm) {
                 Button("Remove All", role: .destructive) {
@@ -103,6 +136,11 @@ struct RootView: View {
             await library.requestAuthorization()
             ensureDefaultContext()
         }
+        .onChange(of: displayedContext?.uuid, initial: true) { _, newUUID in
+            if let uuid = newUUID {
+                lastUsedContextUUID = uuid.uuidString
+            }
+        }
     }
 
     // MARK: - Default context auto-creation
@@ -115,6 +153,11 @@ struct RootView: View {
             ctx.albumLocalIDs = allAlbums.map(\.id)
             modelContext.insert(ctx)
             try? modelContext.save()
+            startupContextUUID = ctx.uuid.uuidString
+        } else if startupContextUUID.isEmpty {
+            if let defaultCtx = contexts.first(where: { $0.isDefault }) {
+                startupContextUUID = defaultCtx.uuid.uuidString
+            }
         }
     }
 

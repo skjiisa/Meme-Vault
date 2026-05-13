@@ -12,6 +12,8 @@ import SwiftData
 import Photos
 
 struct ContextListView: View {
+    var onSelect: (OrgContext) -> Void = { _ in }
+
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: PhotoLibrary
@@ -21,6 +23,8 @@ struct ContextListView: View {
 
     @State private var showingNewContext = false
     @State private var editingContext: OrgContext?
+
+    @AppStorage("startupContextUUID") private var startupContextUUID = ""
 
     /// The default context, pinned at top.
     private var defaultContext: OrgContext? {
@@ -76,6 +80,10 @@ struct ContextListView: View {
             if let defaultCtx = defaultContext {
                 Section {
                     ContextRow(context: defaultCtx)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            onSelect(defaultCtx)
+                        }
                         .swipeActions(edge: .trailing) {
                             Button {
                                 editingContext = defaultCtx
@@ -92,8 +100,15 @@ struct ContextListView: View {
                 Section {
                     ForEach(userContexts) { ctx in
                         ContextRow(context: ctx)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                onSelect(ctx)
+                            }
                             .swipeActions(edge: .trailing) {
                                 Button(role: .destructive) {
+                                    if ctx.uuid.uuidString == startupContextUUID {
+                                        startupContextUUID = defaultContext?.uuid.uuidString ?? ""
+                                    }
                                     modelContext.delete(ctx)
                                 } label: {
                                     Label("Delete", systemImage: "trash")
@@ -107,6 +122,18 @@ struct ContextListView: View {
                             }
                     }
                 }
+            }
+
+            Section {
+                Picker("Open at Launch", selection: $startupContextUUID) {
+                    ForEach(contexts) { ctx in
+                        Text(ctx.name.isEmpty ? "Untitled" : ctx.name)
+                            .tag(ctx.uuid.uuidString)
+                    }
+                    Text("Last Used").tag("lastUsed")
+                }
+            } footer: {
+                Text("Choose which context to show when the app opens.")
             }
         }
     }

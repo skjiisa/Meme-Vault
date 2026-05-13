@@ -41,6 +41,8 @@ final class OrgContext {
     /// auto-populated from all user albums.
     var isDefault: Bool = false
 
+    var uuid: UUID = UUID()
+
     @Relationship(deleteRule: .cascade, inverse: \PhotoSkip.context)
     var skips: [PhotoSkip] = []
 
