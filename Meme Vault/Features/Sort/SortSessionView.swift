@@ -17,7 +17,6 @@ struct SortSessionView: View {
     @EnvironmentObject private var library: PhotoLibrary
 
     @State private var vm: SortSessionViewModel?
-    @State private var showUnsatisfiedConfirm = false
     @State private var showUndoToast = false
     @State private var undoTimer: Task<Void, Never>?
 
@@ -101,26 +100,18 @@ struct SortSessionView: View {
             .frame(height: 360)
             .padding(.horizontal)
 
+            // Control bar
+            controlBar(vm: vm)
+
             // Album list
             albumList(vm: vm)
-
-            // Bottom toolbar
-            bottomBar(vm: vm)
         }
         .padding(.vertical, 8)
         .overlay(alignment: .bottom) {
             if showUndoToast, let action = vm.lastAction {
                 undoToast(action: action, vm: vm)
-                    .padding(.bottom, 70)
+                    .padding(.bottom, 16)
             }
-        }
-        .alert("Photo not sorted", isPresented: $showUnsatisfiedConfirm) {
-            Button("Skip Anyway", role: .destructive) {
-                Task { await vm.advance(removingCurrent: false) }
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("This photo isn't sorted into any album yet.")
         }
     }
 
@@ -172,9 +163,9 @@ struct SortSessionView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Bottom bar
+    // MARK: - Control bar
 
-    private func bottomBar(vm: SortSessionViewModel) -> some View {
+    private func controlBar(vm: SortSessionViewModel) -> some View {
         HStack(spacing: 16) {
             Button {
                 Task { await vm.back() }
@@ -202,18 +193,16 @@ struct SortSessionView: View {
             Spacer()
 
             Button {
-                if vm.isSatisfied {
-                    Task { await vm.nextPressed(force: false) }
+                if vm.isMultiSelectActive {
+                    Task { await vm.deactivateMultiSelect() }
                 } else {
-                    showUnsatisfiedConfirm = true
+                    vm.isMultiSelectActive = true
                 }
             } label: {
-                Label("Next", systemImage: "chevron.right")
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
+                Image(systemName: vm.isMultiSelectActive ? "rectangle.stack.fill" : "rectangle.stack")
+                    .frame(width: 44, height: 44)
+                    .foregroundStyle(vm.isMultiSelectActive ? Color.accentColor : Color.primary)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(vm.isSatisfied ? .green : .orange)
         }
         .padding(.horizontal)
     }

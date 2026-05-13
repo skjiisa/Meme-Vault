@@ -31,6 +31,9 @@ final class SortSessionViewModel {
     /// Recently-acted-on assets for undo of skip/delete.
     private(set) var lastAction: SortAction?
 
+    /// When true, album taps don't auto-advance.
+    var isMultiSelectActive: Bool = false
+
     enum SortAction {
         case skipped(localID: String)
         case queuedDelete(localID: String)
@@ -89,16 +92,23 @@ final class SortSessionViewModel {
         let assets = AlbumService.assets(for: allLocalIDs)
         let assetsByID = Dictionary(uniqueKeysWithValues: assets.map { ($0.localIdentifier, $0) })
 
+        let activeID = currentAssetID
         for id in allLocalIDs {
             if skipIDs.contains(id) || deleteIDs.contains(id) { continue }
             guard let asset = assetsByID[id] else { continue }
             if !evaluator.isSatisfied(asset, in: context) {
                 remaining.append(id)
+            } else if isMultiSelectActive && id == activeID {
+                remaining.append(id)
             }
         }
 
         self.queue = remaining
-        self.index = 0
+        if let activeID, let newIndex = remaining.firstIndex(of: activeID) {
+            self.index = newIndex
+        } else {
+            self.index = 0
+        }
         self.isLoading = false
         refreshCurrent()
     }
@@ -151,19 +161,37 @@ final class SortSessionViewModel {
         guard let asset = currentAsset,
               let collection = AlbumService.collection(for: albumLocalID) else { return }
         let isMember = AlbumService.isAsset(asset, memberOf: collection)
+        let wasSatisfied = isSatisfied
         do {
             if isMember {
                 try await AlbumService.remove(asset, from: collection)
                 evaluator.noteRemoved(asset: asset.localIdentifier, from: albumLocalID)
+                recomputeMemberships()
+                Haptics.tap()
             } else {
                 try await AlbumService.add(asset, to: collection)
                 evaluator.noteAdded(asset: asset.localIdentifier, to: albumLocalID)
+                if !isMultiSelectActive && !wasSatisfied {
+                    let newMemberships = evaluator.albumMemberships(for: asset, in: context)
+                    if newMemberships.contains(where: \.isMember) {
+                        Haptics.tap()
+                        await advance(removingCurrent: true)
+                        return
+                    }
+                }
+                recomputeMemberships()
+                Haptics.tap()
             }
-            recomputeMemberships()
-            Haptics.tap()
         } catch {
             Haptics.warning()
             print("toggleAlbum failed: \(error)")
+        }
+    }
+
+    func deactivateMultiSelect() async {
+        isMultiSelectActive = false
+        if isSatisfied {
+            await advance(removingCurrent: true)
         }
     }
 
@@ -185,17 +213,6 @@ final class SortSessionViewModel {
         guard index > 0 else { return }
         index -= 1
         refreshCurrent()
-    }
-
-    /// Press "Next". If satisfied, drop from queue. Otherwise advance the
-    /// pointer without removing — caller may show a confirm dialog before
-    /// invoking with `force: true`.
-    func nextPressed(force: Bool) async {
-        if isSatisfied {
-            await advance(removingCurrent: true)
-        } else if force {
-            await advance(removingCurrent: false)
-        }
     }
 
     // MARK: - Skip
