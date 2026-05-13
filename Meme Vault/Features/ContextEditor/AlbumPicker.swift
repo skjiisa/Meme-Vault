@@ -99,6 +99,7 @@ struct AlbumPicker: View {
                             .foregroundStyle(.tint)
                     }
                 }
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
@@ -115,7 +116,9 @@ struct AlbumPicker: View {
                           ? "checkmark.circle.fill" : "circle")
                         .foregroundStyle(binding.wrappedValue.contains(album.id) ? Color.accentColor : Color.secondary)
                     rowLabel(album)
+                    Spacer()
                 }
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         }

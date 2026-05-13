@@ -12,6 +12,8 @@ import SwiftData
 import Photos
 
 struct ContextListView: View {
+    var onSelect: (OrgContext) -> Void = { _ in }
+
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var library: PhotoLibrary
@@ -76,6 +78,11 @@ struct ContextListView: View {
             if let defaultCtx = defaultContext {
                 Section {
                     ContextRow(context: defaultCtx)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            onSelect(defaultCtx)
+                            dismiss()
+                        }
                         .swipeActions(edge: .trailing) {
                             Button {
                                 editingContext = defaultCtx
@@ -92,6 +99,11 @@ struct ContextListView: View {
                 Section {
                     ForEach(userContexts) { ctx in
                         ContextRow(context: ctx)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                onSelect(ctx)
+                                dismiss()
+                            }
                             .swipeActions(edge: .trailing) {
                                 Button(role: .destructive) {
                                     modelContext.delete(ctx)

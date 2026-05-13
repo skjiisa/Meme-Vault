@@ -23,10 +23,20 @@ struct RootView: View {
     @State private var showingContextList = false
     @State private var showingDebugConfirm = false
     @State private var debugMessage: String?
+    @State private var selectedContext: OrgContext?
 
     /// The primary context to show: default first, otherwise the first available.
     private var primaryContext: OrgContext? {
         contexts.first { $0.isDefault } ?? contexts.first
+    }
+
+    /// The context currently on screen: explicit selection, or the primary default.
+    private var displayedContext: OrgContext? {
+        if let selected = selectedContext,
+           contexts.contains(where: { $0.persistentModelID == selected.persistentModelID }) {
+            return selected
+        }
+        return primaryContext
     }
 
     var body: some View {
@@ -34,7 +44,7 @@ struct RootView: View {
             Group {
                 if !library.isAuthorized {
                     AuthorizationGateView()
-                } else if let ctx = primaryContext {
+                } else if let ctx = displayedContext {
                     SortSessionView(context: ctx)
                 } else {
                     // No contexts yet — will be created momentarily by .task
@@ -78,7 +88,9 @@ struct RootView: View {
                 #endif
             }
             .sheet(isPresented: $showingContextList) {
-                ContextListView()
+                ContextListView(onSelect: { context in
+                    selectedContext = context
+                })
             }
             .alert("Debug: Clear Album Membership", isPresented: $showingDebugConfirm) {
                 Button("Remove All", role: .destructive) {
