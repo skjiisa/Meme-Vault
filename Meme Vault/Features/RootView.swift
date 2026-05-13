@@ -26,9 +26,22 @@ struct RootView: View {
     @State private var selectedContext: OrgContext?
     @State private var pendingContext: OrgContext?
 
-    /// The primary context to show: default first, otherwise the first available.
-    private var primaryContext: OrgContext? {
+    @AppStorage("startupContextUUID") private var startupContextUUID = ""
+    @AppStorage("lastUsedContextUUID") private var lastUsedContextUUID = ""
+
+    private var fallbackContext: OrgContext? {
         contexts.first { $0.isDefault } ?? contexts.first
+    }
+
+    /// The primary context to show, respecting the user's startup preference.
+    private var primaryContext: OrgContext? {
+        if startupContextUUID == "lastUsed" {
+            return contexts.first { $0.uuid.uuidString == lastUsedContextUUID } ?? fallbackContext
+        }
+        if !startupContextUUID.isEmpty {
+            return contexts.first { $0.uuid.uuidString == startupContextUUID } ?? fallbackContext
+        }
+        return fallbackContext
     }
 
     /// The context currently on screen: explicit selection, or the primary default.
@@ -123,6 +136,11 @@ struct RootView: View {
             await library.requestAuthorization()
             ensureDefaultContext()
         }
+        .onChange(of: displayedContext?.uuid, initial: true) { _, newUUID in
+            if let uuid = newUUID {
+                lastUsedContextUUID = uuid.uuidString
+            }
+        }
     }
 
     // MARK: - Default context auto-creation
@@ -135,6 +153,11 @@ struct RootView: View {
             ctx.albumLocalIDs = allAlbums.map(\.id)
             modelContext.insert(ctx)
             try? modelContext.save()
+            startupContextUUID = ctx.uuid.uuidString
+        } else if startupContextUUID.isEmpty {
+            if let defaultCtx = contexts.first(where: { $0.isDefault }) {
+                startupContextUUID = defaultCtx.uuid.uuidString
+            }
         }
     }
 

@@ -24,6 +24,8 @@ struct ContextListView: View {
     @State private var showingNewContext = false
     @State private var editingContext: OrgContext?
 
+    @AppStorage("startupContextUUID") private var startupContextUUID = ""
+
     /// The default context, pinned at top.
     private var defaultContext: OrgContext? {
         contexts.first { $0.isDefault }
@@ -104,6 +106,9 @@ struct ContextListView: View {
                             }
                             .swipeActions(edge: .trailing) {
                                 Button(role: .destructive) {
+                                    if ctx.uuid.uuidString == startupContextUUID {
+                                        startupContextUUID = defaultContext?.uuid.uuidString ?? ""
+                                    }
                                     modelContext.delete(ctx)
                                 } label: {
                                     Label("Delete", systemImage: "trash")
@@ -117,6 +122,18 @@ struct ContextListView: View {
                             }
                     }
                 }
+            }
+
+            Section {
+                Picker("Open at Launch", selection: $startupContextUUID) {
+                    ForEach(contexts) { ctx in
+                        Text(ctx.name.isEmpty ? "Untitled" : ctx.name)
+                            .tag(ctx.uuid.uuidString)
+                    }
+                    Text("Last Used").tag("lastUsed")
+                }
+            } footer: {
+                Text("Choose which context to show when the app opens.")
             }
         }
     }
