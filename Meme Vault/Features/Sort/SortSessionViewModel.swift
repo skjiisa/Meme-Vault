@@ -37,6 +37,9 @@ final class SortSessionViewModel {
     /// Non-context albums selected via the "Other Albums" sheet for the current photo.
     var extraAlbumIDs: Set<String> = []
 
+    /// Shown when the user tries to save with only extra (non-context) albums selected.
+    var showExtraOnlyAlert: Bool = false
+
     enum SortAction {
         case skipped(localID: String)
         case queuedDelete(localID: String)
@@ -151,6 +154,11 @@ final class SortSessionViewModel {
         return memberships.contains(where: \.isMember)
     }
 
+    private var isSatisfiedByContextAlbum: Bool {
+        let contextIDs = Set(context.albumLocalIDs)
+        return memberships.contains { contextIDs.contains($0.id) && $0.isMember }
+    }
+
     /// Local ID of the asset currently shown — drives the carousel's page.
     var currentAssetID: String? {
         index < queue.count ? queue[index] : nil
@@ -204,10 +212,24 @@ final class SortSessionViewModel {
     }
 
     func deactivateMultiSelect() async {
+        if isSatisfied && !isSatisfiedByContextAlbum {
+            showExtraOnlyAlert = true
+            return
+        }
         isMultiSelectActive = false
         if isSatisfied {
             await advance(removingCurrent: true)
         }
+    }
+
+    func skipFromExtraOnlyAlert() async {
+        showExtraOnlyAlert = false
+        isMultiSelectActive = false
+        await skip()
+    }
+
+    func dismissExtraOnlyAlert() {
+        showExtraOnlyAlert = false
     }
 
     // MARK: - Advance / back

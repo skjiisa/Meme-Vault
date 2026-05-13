@@ -123,6 +123,22 @@ struct SortSessionView: View {
                 )
             }
         }
+        .alert(
+            "No Destination Album",
+            isPresented: Binding(
+                get: { vm.showExtraOnlyAlert },
+                set: { vm.showExtraOnlyAlert = $0 }
+            )
+        ) {
+            Button("Skip Item") {
+                Task { await vm.skipFromExtraOnlyAlert() }
+            }
+            Button("Select Destination", role: .cancel) {
+                vm.dismissExtraOnlyAlert()
+            }
+        } message: {
+            Text("This item isn't in any of this context's destination albums. Skip it, or go back and select a destination.")
+        }
     }
 
     // MARK: - Flat album list
