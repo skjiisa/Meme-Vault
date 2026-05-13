@@ -34,6 +34,9 @@ final class SortSessionViewModel {
     /// When true, album taps don't auto-advance.
     var isMultiSelectActive: Bool = false
 
+    /// Non-context albums selected via the "Other Albums" sheet for the current photo.
+    var extraAlbumIDs: Set<String> = []
+
     enum SortAction {
         case skipped(localID: String)
         case queuedDelete(localID: String)
@@ -119,16 +122,28 @@ final class SortSessionViewModel {
         guard index < queue.count else {
             currentAsset = nil
             memberships = []
+            extraAlbumIDs = []
             return
         }
         let id = queue[index]
-        currentAsset = AlbumService.asset(for: id)
+        let newAsset = AlbumService.asset(for: id)
+        if newAsset?.localIdentifier != currentAsset?.localIdentifier {
+            extraAlbumIDs = []
+        }
+        currentAsset = newAsset
         recomputeMemberships()
     }
 
-    private func recomputeMemberships() {
+    func recomputeMemberships() {
         guard let asset = currentAsset else { memberships = []; return }
-        memberships = evaluator.albumMemberships(for: asset, in: context)
+        var result = evaluator.albumMemberships(for: asset, in: context)
+        for albumID in extraAlbumIDs {
+            if let collection = AlbumService.collection(for: albumID) {
+                let isMember = AlbumService.isAsset(asset, memberOf: collection)
+                result.append(AlbumMembership(id: albumID, isMember: isMember))
+            }
+        }
+        memberships = result
     }
 
     var isSatisfied: Bool {

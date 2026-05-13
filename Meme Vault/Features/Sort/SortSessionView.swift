@@ -19,6 +19,7 @@ struct SortSessionView: View {
     @State private var vm: SortSessionViewModel?
     @State private var showUndoToast = false
     @State private var undoTimer: Task<Void, Never>?
+    @State private var showExtraAlbumPicker = false
 
     var body: some View {
         Group {
@@ -113,6 +114,15 @@ struct SortSessionView: View {
                     .padding(.bottom, 16)
             }
         }
+        .sheet(isPresented: $showExtraAlbumPicker) {
+            if let asset = vm.currentAsset {
+                ExtraAlbumSheet(
+                    asset: asset,
+                    contextAlbumIDs: Set(context.albumLocalIDs),
+                    vm: vm
+                )
+            }
+        }
     }
 
     // MARK: - Flat album list
@@ -121,15 +131,46 @@ struct SortSessionView: View {
     private func albumList(vm: SortSessionViewModel) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 8) {
-                ForEach(albumInfos, id: \.id) { info in
+                ForEach(albumInfos + extraAlbumInfos(vm: vm), id: \.id) { info in
                     let membership = vm.memberships.first { $0.id == info.id }
                     let isMember = membership?.isMember ?? false
                     albumRow(info: info, isMember: isMember, vm: vm)
+                }
+                if vm.isMultiSelectActive && hasNonContextAlbums {
+                    Button {
+                        showExtraAlbumPicker = true
+                    } label: {
+                        HStack {
+                            Image(systemName: "plus.circle")
+                                .foregroundStyle(Color.accentColor)
+                            Text("Other Albums")
+                                .foregroundStyle(.primary)
+                            Spacer()
+                        }
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(Color(.tertiarySystemFill))
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             .padding(.horizontal)
         }
         .frame(maxHeight: 280)
+    }
+
+    private var hasNonContextAlbums: Bool {
+        let contextIDs = Set(context.albumLocalIDs)
+        return AlbumService.listUserAlbums().contains { !contextIDs.contains($0.id) }
+    }
+
+    private func extraAlbumInfos(vm: SortSessionViewModel) -> [AlbumInfo] {
+        guard !vm.extraAlbumIDs.isEmpty else { return [] }
+        let collections = AlbumService.collections(for: Array(vm.extraAlbumIDs))
+        return collections.map { AlbumInfo(collection: $0) }
     }
 
     private var albumInfos: [AlbumInfo] {
@@ -246,5 +287,76 @@ struct SortSessionView: View {
         .background(.ultraThinMaterial, in: Capsule())
         .padding(.horizontal, 24)
         .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+}
+
+// MARK: - Extra album sheet
+
+private struct ExtraAlbumSheet: View {
+    let asset: PHAsset
+    let contextAlbumIDs: Set<String>
+    let vm: SortSessionViewModel
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var albums: [AlbumInfo] = []
+    @State private var memberIDs: Set<String> = []
+
+    var body: some View {
+        NavigationStack {
+            List(albums) { album in
+                Button {
+                    Task { await toggle(album) }
+                } label: {
+                    HStack {
+                        Image(systemName: memberIDs.contains(album.id)
+                              ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(memberIDs.contains(album.id)
+                                             ? Color.accentColor : Color.secondary)
+                        Text(album.title)
+                            .foregroundStyle(.primary)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .navigationTitle("Other Albums")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .onAppear { load() }
+        }
+    }
+
+    private func load() {
+        albums = AlbumService.listUserAlbums().filter { !contextAlbumIDs.contains($0.id) }
+        for album in albums {
+            if let collection = AlbumService.collection(for: album.id),
+               AlbumService.isAsset(asset, memberOf: collection) {
+                memberIDs.insert(album.id)
+            }
+        }
+    }
+
+    private func toggle(_ album: AlbumInfo) async {
+        guard let collection = AlbumService.collection(for: album.id) else { return }
+        do {
+            if memberIDs.contains(album.id) {
+                try await AlbumService.remove(asset, from: collection)
+                memberIDs.remove(album.id)
+                vm.extraAlbumIDs.remove(album.id)
+            } else {
+                try await AlbumService.add(asset, to: collection)
+                memberIDs.insert(album.id)
+                vm.extraAlbumIDs.insert(album.id)
+            }
+            vm.recomputeMemberships()
+            Haptics.tap()
+        } catch {
+            Haptics.warning()
+        }
     }
 }
