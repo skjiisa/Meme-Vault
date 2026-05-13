@@ -17,9 +17,9 @@ struct SortSessionView: View {
     @EnvironmentObject private var library: PhotoLibrary
 
     @State private var vm: SortSessionViewModel?
-    @State private var showUnsatisfiedConfirm = false
     @State private var showUndoToast = false
     @State private var undoTimer: Task<Void, Never>?
+    @State private var showExtraAlbumPicker = false
 
     var body: some View {
         Group {
@@ -101,26 +101,43 @@ struct SortSessionView: View {
             .frame(height: 360)
             .padding(.horizontal)
 
+            // Control bar
+            controlBar(vm: vm)
+
             // Album list
             albumList(vm: vm)
-
-            // Bottom toolbar
-            bottomBar(vm: vm)
         }
         .padding(.vertical, 8)
         .overlay(alignment: .bottom) {
             if showUndoToast, let action = vm.lastAction {
                 undoToast(action: action, vm: vm)
-                    .padding(.bottom, 70)
+                    .padding(.bottom, 16)
             }
         }
-        .alert("Photo not sorted", isPresented: $showUnsatisfiedConfirm) {
-            Button("Skip Anyway", role: .destructive) {
-                Task { await vm.advance(removingCurrent: false) }
+        .sheet(isPresented: $showExtraAlbumPicker) {
+            if let asset = vm.currentAsset {
+                ExtraAlbumSheet(
+                    asset: asset,
+                    contextAlbumIDs: Set(context.albumLocalIDs),
+                    vm: vm
+                )
             }
-            Button("Cancel", role: .cancel) { }
+        }
+        .alert(
+            "No Destination Album",
+            isPresented: Binding(
+                get: { vm.showExtraOnlyAlert },
+                set: { vm.showExtraOnlyAlert = $0 }
+            )
+        ) {
+            Button("Skip Item") {
+                Task { await vm.skipFromExtraOnlyAlert() }
+            }
+            Button("Select Destination", role: .cancel) {
+                vm.dismissExtraOnlyAlert()
+            }
         } message: {
-            Text("This photo isn't sorted into any album yet.")
+            Text("This item isn't in any of this context's destination albums. Skip it, or go back and select a destination.")
         }
     }
 
@@ -135,10 +152,50 @@ struct SortSessionView: View {
                     let isMember = membership?.isMember ?? false
                     albumRow(info: info, isMember: isMember, vm: vm)
                 }
+                ForEach(extraAlbumInfos(vm: vm), id: \.id) { info in
+                    let membership = vm.memberships.first { $0.id == info.id }
+                    let isMember = membership?.isMember ?? false
+                    albumRow(info: info, isMember: isMember, vm: vm)
+                        .transition(.opacity.combined(with: .slide))
+                }
+                if vm.isMultiSelectActive && hasNonContextAlbums {
+                    Button {
+                        showExtraAlbumPicker = true
+                    } label: {
+                        HStack {
+                            Image(systemName: "plus.circle")
+                                .foregroundStyle(Color.accentColor)
+                            Text("Other Albums")
+                                .foregroundStyle(.primary)
+                            Spacer()
+                        }
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(Color(.tertiarySystemFill))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .transition(.opacity.combined(with: .slide))
+                }
             }
             .padding(.horizontal)
+            .animation(.easeInOut(duration: 0.25), value: vm.extraAlbumIDs)
+            .animation(.easeInOut(duration: 0.25), value: vm.isMultiSelectActive)
         }
         .frame(maxHeight: 280)
+    }
+
+    private var hasNonContextAlbums: Bool {
+        let contextIDs = Set(context.albumLocalIDs)
+        return AlbumService.listUserAlbums().contains { !contextIDs.contains($0.id) }
+    }
+
+    private func extraAlbumInfos(vm: SortSessionViewModel) -> [AlbumInfo] {
+        guard !vm.extraAlbumIDs.isEmpty else { return [] }
+        let collections = AlbumService.collections(for: Array(vm.extraAlbumIDs))
+        return collections.map { AlbumInfo(collection: $0) }
     }
 
     private var albumInfos: [AlbumInfo] {
@@ -172,9 +229,9 @@ struct SortSessionView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Bottom bar
+    // MARK: - Control bar
 
-    private func bottomBar(vm: SortSessionViewModel) -> some View {
+    private func controlBar(vm: SortSessionViewModel) -> some View {
         HStack(spacing: 16) {
             Button {
                 Task { await vm.back() }
@@ -202,18 +259,16 @@ struct SortSessionView: View {
             Spacer()
 
             Button {
-                if vm.isSatisfied {
-                    Task { await vm.nextPressed(force: false) }
+                if vm.isMultiSelectActive {
+                    Task { await vm.deactivateMultiSelect() }
                 } else {
-                    showUnsatisfiedConfirm = true
+                    vm.isMultiSelectActive = true
                 }
             } label: {
-                Label("Next", systemImage: "chevron.right")
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
+                Image(systemName: vm.isMultiSelectActive ? "rectangle.stack.fill" : "rectangle.stack")
+                    .frame(width: 44, height: 44)
+                    .foregroundStyle(vm.isMultiSelectActive ? Color.accentColor : Color.primary)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(vm.isSatisfied ? .green : .orange)
         }
         .padding(.horizontal)
     }
@@ -257,5 +312,76 @@ struct SortSessionView: View {
         .background(.ultraThinMaterial, in: Capsule())
         .padding(.horizontal, 24)
         .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+}
+
+// MARK: - Extra album sheet
+
+private struct ExtraAlbumSheet: View {
+    let asset: PHAsset
+    let contextAlbumIDs: Set<String>
+    let vm: SortSessionViewModel
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var albums: [AlbumInfo] = []
+    @State private var memberIDs: Set<String> = []
+
+    var body: some View {
+        NavigationStack {
+            List(albums) { album in
+                Button {
+                    Task { await toggle(album) }
+                } label: {
+                    HStack {
+                        Image(systemName: memberIDs.contains(album.id)
+                              ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(memberIDs.contains(album.id)
+                                             ? Color.accentColor : Color.secondary)
+                        Text(album.title)
+                            .foregroundStyle(.primary)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .navigationTitle("Other Albums")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .onAppear { load() }
+        }
+    }
+
+    private func load() {
+        albums = AlbumService.listUserAlbums().filter { !contextAlbumIDs.contains($0.id) }
+        for album in albums {
+            if let collection = AlbumService.collection(for: album.id),
+               AlbumService.isAsset(asset, memberOf: collection) {
+                memberIDs.insert(album.id)
+            }
+        }
+    }
+
+    private func toggle(_ album: AlbumInfo) async {
+        guard let collection = AlbumService.collection(for: album.id) else { return }
+        do {
+            if memberIDs.contains(album.id) {
+                try await AlbumService.remove(asset, from: collection)
+                memberIDs.remove(album.id)
+                vm.extraAlbumIDs.remove(album.id)
+            } else {
+                try await AlbumService.add(asset, to: collection)
+                memberIDs.insert(album.id)
+                vm.extraAlbumIDs.insert(album.id)
+            }
+            vm.recomputeMemberships()
+            Haptics.tap()
+        } catch {
+            Haptics.warning()
+        }
     }
 }
