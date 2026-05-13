@@ -81,7 +81,6 @@ struct ContextListView: View {
                         .contentShape(Rectangle())
                         .onTapGesture {
                             onSelect(defaultCtx)
-                            dismiss()
                         }
                         .swipeActions(edge: .trailing) {
                             Button {
@@ -102,7 +101,6 @@ struct ContextListView: View {
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 onSelect(ctx)
-                                dismiss()
                             }
                             .swipeActions(edge: .trailing) {
                                 Button(role: .destructive) {

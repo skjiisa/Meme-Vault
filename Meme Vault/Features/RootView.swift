@@ -24,6 +24,7 @@ struct RootView: View {
     @State private var showingDebugConfirm = false
     @State private var debugMessage: String?
     @State private var selectedContext: OrgContext?
+    @State private var pendingContext: OrgContext?
 
     /// The primary context to show: default first, otherwise the first available.
     private var primaryContext: OrgContext? {
@@ -46,6 +47,7 @@ struct RootView: View {
                     AuthorizationGateView()
                 } else if let ctx = displayedContext {
                     SortSessionView(context: ctx)
+                        .id(ctx.persistentModelID)
                 } else {
                     // No contexts yet — will be created momentarily by .task
                     ProgressView("Setting up…")
@@ -87,9 +89,15 @@ struct RootView: View {
                 }
                 #endif
             }
-            .sheet(isPresented: $showingContextList) {
+            .sheet(isPresented: $showingContextList, onDismiss: {
+                if let pending = pendingContext {
+                    selectedContext = pending
+                    pendingContext = nil
+                }
+            }) {
                 ContextListView(onSelect: { context in
-                    selectedContext = context
+                    pendingContext = context
+                    showingContextList = false
                 })
             }
             .alert("Debug: Clear Album Membership", isPresented: $showingDebugConfirm) {
