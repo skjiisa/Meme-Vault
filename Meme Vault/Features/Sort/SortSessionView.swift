@@ -147,10 +147,16 @@ struct SortSessionView: View {
     private func albumList(vm: SortSessionViewModel) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 8) {
-                ForEach(albumInfos + extraAlbumInfos(vm: vm), id: \.id) { info in
+                ForEach(albumInfos, id: \.id) { info in
                     let membership = vm.memberships.first { $0.id == info.id }
                     let isMember = membership?.isMember ?? false
                     albumRow(info: info, isMember: isMember, vm: vm)
+                }
+                ForEach(extraAlbumInfos(vm: vm), id: \.id) { info in
+                    let membership = vm.memberships.first { $0.id == info.id }
+                    let isMember = membership?.isMember ?? false
+                    albumRow(info: info, isMember: isMember, vm: vm)
+                        .transition(.opacity.combined(with: .slide))
                 }
                 if vm.isMultiSelectActive && hasNonContextAlbums {
                     Button {
@@ -171,9 +177,12 @@ struct SortSessionView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .transition(.opacity.combined(with: .slide))
                 }
             }
             .padding(.horizontal)
+            .animation(.easeInOut(duration: 0.25), value: vm.extraAlbumIDs)
+            .animation(.easeInOut(duration: 0.25), value: vm.isMultiSelectActive)
         }
         .frame(maxHeight: 280)
     }
