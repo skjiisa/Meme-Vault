@@ -20,6 +20,7 @@ struct SortSessionView: View {
     @State private var showUndoToast = false
     @State private var undoTimer: Task<Void, Never>?
     @State private var showExtraAlbumPicker = false
+    @State private var showingContextEditor = false
     @State private var columnCount = 3
 
     private var columnCountKey: String {
@@ -37,6 +38,18 @@ struct SortSessionView: View {
         }
         .navigationTitle(context.name.isEmpty ? "Sort" : context.name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Edit Context", systemImage: "slider.horizontal.3") {
+                    showingContextEditor = true
+                }
+            }
+        }
+        .sheet(isPresented: $showingContextEditor, onDismiss: {
+            Task { await vm?.rebuildQueue() }
+        }) {
+            ContextEditorView(mode: .edit(context))
+        }
         .task {
             if vm == nil {
                 vm = SortSessionViewModel(context: context, modelContext: modelContext)
@@ -240,7 +253,15 @@ struct SortSessionView: View {
         let byID = Dictionary(uniqueKeysWithValues: collections.map {
             ($0.localIdentifier, AlbumInfo(collection: $0))
         })
-        return context.albumLocalIDs.compactMap { byID[$0] }
+        var infos = context.albumLocalIDs.compactMap { byID[$0] }
+        if context.autoSortAlbumsByCount {
+            infos.sort { lhs, rhs in
+                let lCount = lhs.estimatedAssetCount == NSNotFound ? 0 : lhs.estimatedAssetCount
+                let rCount = rhs.estimatedAssetCount == NSNotFound ? 0 : rhs.estimatedAssetCount
+                return lCount > rCount
+            }
+        }
+        return infos
     }
 
     // MARK: - Control bar

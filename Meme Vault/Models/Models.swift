@@ -43,6 +43,10 @@ final class OrgContext {
 
     var uuid: UUID = UUID()
 
+    /// When true, destination albums are sorted by item count (most first)
+    /// instead of the manual order stored in `albumLocalIDs`.
+    var autoSortAlbumsByCount: Bool = false
+
     @Relationship(deleteRule: .cascade, inverse: \PhotoSkip.context)
     var skips: [PhotoSkip] = []
 

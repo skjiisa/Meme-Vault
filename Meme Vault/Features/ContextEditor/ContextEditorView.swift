@@ -24,7 +24,8 @@ struct ContextEditorView: View {
     @State private var name: String = ""
     @State private var sourceKind: SourceKind = .allPhotos
     @State private var sourceAlbumLocalID: String?
-    @State private var albumSelection: Set<String> = []
+    @State private var albumOrder: [String] = []
+    @State private var autoSortByCount: Bool = false
 
     @State private var showingSourcePicker = false
     @State private var showingAlbumPicker = false
@@ -85,7 +86,7 @@ struct ContextEditorView: View {
             .sheet(isPresented: $showingAlbumPicker) {
                 AlbumPicker(
                     title: "Destination Albums",
-                    mode: .multi($albumSelection)
+                    mode: .multi(albumSelectionBinding)
                 )
             }
             .onAppear(perform: setup)
@@ -105,6 +106,13 @@ struct ContextEditorView: View {
                 .foregroundStyle(.secondary)
         }
         Section {
+            Toggle("Sort by Album Size", isOn: $autoSortByCount)
+                .onChange(of: autoSortByCount) { _, newValue in
+                    if case .edit(let ctx) = mode {
+                        ctx.autoSortAlbumsByCount = newValue
+                        try? modelContext.save()
+                    }
+                }
             Label("All albums in your library", systemImage: "rectangle.stack")
                 .foregroundStyle(.secondary)
         } header: {
@@ -140,32 +148,51 @@ struct ContextEditorView: View {
             TextField("Context name", text: $name)
         }
         Section {
-            if !albumSelection.isEmpty {
+            Toggle("Sort by Album Size", isOn: $autoSortByCount)
+        } header: {
+            Text("Destination Albums")
+        }
+        Section {
+            if !albumOrder.isEmpty {
                 ForEach(selectedAlbumInfos, id: \.id) { info in
                     HStack {
+                        if !autoSortByCount {
+                            Image(systemName: "line.3.horizontal")
+                                .foregroundStyle(.tertiary)
+                                .font(.subheadline)
+                        }
                         Image(systemName: "rectangle.stack")
                             .foregroundStyle(.secondary)
                         Text(info.title)
                         Spacer()
-                        Button {
-                            albumSelection.remove(info.id)
-                        } label: {
-                            Image(systemName: "minus.circle.fill")
-                                .foregroundStyle(.red)
+                        if autoSortByCount, info.estimatedAssetCount != NSNotFound {
+                            Text("^[\(info.estimatedAssetCount) photo](inflect: true)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
+                .onDelete { offsets in
+                    let infos = selectedAlbumInfos
+                    for index in offsets {
+                        albumOrder.removeAll { $0 == infos[index].id }
+                    }
+                }
+                .onMove { from, to in
+                    albumOrder.move(fromOffsets: from, toOffset: to)
+                }
+                .moveDisabled(autoSortByCount)
+                .deleteDisabled(autoSortByCount)
             }
             Button {
                 showingAlbumPicker = true
             } label: {
                 Label("Choose Albums", systemImage: "plus")
             }
-        } header: {
-            Text("Destination Albums")
         } footer: {
-            Text("A photo is sorted when it belongs to at least one of these albums.")
+            Text(autoSortByCount
+                 ? "Albums are sorted by item count, most first."
+                 : "Hold and drag to reorder. Swipe to remove.")
         }
     }
 
@@ -179,7 +206,8 @@ struct ContextEditorView: View {
             name = ctx.name
             sourceKind = ctx.sourceKind
             sourceAlbumLocalID = ctx.sourceAlbumLocalID
-            albumSelection = Set(ctx.albumLocalIDs)
+            albumOrder = ctx.albumLocalIDs
+            autoSortByCount = ctx.autoSortAlbumsByCount
         }
     }
 
@@ -201,20 +229,47 @@ struct ContextEditorView: View {
     private var isValid: Bool {
         guard !name.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
         if sourceKind == .album && sourceAlbumLocalID == nil { return false }
-        return !albumSelection.isEmpty
+        return !albumOrder.isEmpty
+    }
+
+    private var albumSelectionBinding: Binding<Set<String>> {
+        Binding(
+            get: { Set(albumOrder) },
+            set: { newSet in
+                albumOrder.removeAll { !newSet.contains($0) }
+                for id in newSet where !albumOrder.contains(id) {
+                    albumOrder.append(id)
+                }
+            }
+        )
     }
 
     private var selectedAlbumInfos: [AlbumInfo] {
-        let collections = AlbumService.collections(for: Array(albumSelection))
+        let collections = AlbumService.collections(for: albumOrder)
         let byID = Dictionary(uniqueKeysWithValues: collections.map {
             ($0.localIdentifier, AlbumInfo(collection: $0))
         })
-        return Array(albumSelection).compactMap { byID[$0] }
+        var infos = albumOrder.compactMap { byID[$0] }
+        if autoSortByCount {
+            infos.sort { lhs, rhs in
+                let lCount = lhs.estimatedAssetCount == NSNotFound ? 0 : lhs.estimatedAssetCount
+                let rCount = rhs.estimatedAssetCount == NSNotFound ? 0 : rhs.estimatedAssetCount
+                return lCount > rCount
+            }
+        }
+        return infos
     }
 
     // MARK: - Save
 
     private func save() {
+        let orderedIDs: [String]
+        if autoSortByCount {
+            orderedIDs = selectedAlbumInfos.map(\.id)
+        } else {
+            orderedIDs = albumOrder
+        }
+
         switch mode {
         case .create:
             let ctx = OrgContext(
@@ -222,13 +277,15 @@ struct ContextEditorView: View {
                 sourceKind: sourceKind,
                 sourceAlbumLocalID: sourceKind == .album ? sourceAlbumLocalID : nil
             )
-            ctx.albumLocalIDs = Array(albumSelection)
+            ctx.albumLocalIDs = orderedIDs
+            ctx.autoSortAlbumsByCount = autoSortByCount
             modelContext.insert(ctx)
         case .edit(let ctx):
             ctx.name = name.trimmingCharacters(in: .whitespaces)
             ctx.sourceKind = sourceKind
             ctx.sourceAlbumLocalID = sourceKind == .album ? sourceAlbumLocalID : nil
-            ctx.albumLocalIDs = Array(albumSelection)
+            ctx.albumLocalIDs = orderedIDs
+            ctx.autoSortAlbumsByCount = autoSortByCount
         }
         try? modelContext.save()
         dismiss()
