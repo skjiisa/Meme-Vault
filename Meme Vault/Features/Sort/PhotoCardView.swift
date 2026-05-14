@@ -80,10 +80,19 @@ private struct PhotoPage: View {
             switch phase {
             case .loaded:
                 if let image {
+                    Color.clear
+                        .overlay {
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFill()
+                        }
+                        .clipped()
+                        .blur(radius: 24)
+                        .opacity(0.5)
+
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFit()
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
                 }
             case .loading:
                 ProgressView()
@@ -93,6 +102,7 @@ private struct PhotoPage: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .clipShape(RoundedRectangle(cornerRadius: 16))
         .task(id: assetID) {
             image = nil
             phase = .loading
