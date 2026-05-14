@@ -106,7 +106,7 @@ struct SortSessionView: View {
 
     @ViewBuilder
     private func sortContent(vm: SortSessionViewModel) -> some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 6) {
             // Progress
             HStack {
                 Text(vm.progressText)
@@ -129,7 +129,7 @@ struct SortSessionView: View {
                     set: { id in if let id { vm.showAsset(id: id) } }
                 )
             )
-            .frame(height: 360)
+            .frame(height: 300)
 
             // Upcoming items preview
             let upcomingIDs = Array(vm.queue.dropFirst(vm.index + 1).prefix(20))
@@ -143,7 +143,7 @@ struct SortSessionView: View {
             // Album list
             albumList(vm: vm)
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 4)
         .overlay(alignment: .bottom) {
             if showUndoToast, let action = vm.lastAction {
                 undoToast(action: action, vm: vm)
@@ -190,7 +190,7 @@ struct SortSessionView: View {
     private func albumList(vm: SortSessionViewModel) -> some View {
         let infos = albumInfos(refreshTick: vm.albumRefreshTick)
         ScrollView {
-            LazyVGrid(columns: albumColumns, spacing: 12) {
+            LazyVGrid(columns: albumColumns, spacing: 8) {
                 ForEach(infos, id: \.id) { info in
                     let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
                     Button {
@@ -295,7 +295,7 @@ struct SortSessionView: View {
                 Task { await vm.back() }
             } label: {
                 Image(systemName: "arrow.uturn.backward")
-                    .frame(width: 44, height: 44)
+                    .frame(width: 44, height: 36)
             }
             .disabled(vm.index == 0)
 
@@ -303,7 +303,7 @@ struct SortSessionView: View {
                 Task { await vm.queueDelete(); showToast() }
             } label: {
                 Image(systemName: "trash")
-                    .frame(width: 44, height: 44)
+                    .frame(width: 44, height: 36)
                     .foregroundStyle(.red)
             }
 
@@ -311,7 +311,7 @@ struct SortSessionView: View {
                 Task { await vm.skip(); showToast() }
             } label: {
                 Image(systemName: "arrow.right.to.line")
-                    .frame(width: 44, height: 44)
+                    .frame(width: 44, height: 36)
             }
 
             Spacer()
@@ -322,7 +322,7 @@ struct SortSessionView: View {
                 }
             } label: {
                 Image(systemName: "minus.magnifyingglass")
-                    .frame(width: 44, height: 44)
+                    .frame(width: 44, height: 36)
             }
             .disabled(columnCount >= 5)
 
@@ -332,7 +332,7 @@ struct SortSessionView: View {
                 }
             } label: {
                 Image(systemName: "plus.magnifyingglass")
-                    .frame(width: 44, height: 44)
+                    .frame(width: 44, height: 36)
             }
             .disabled(columnCount <= 2)
 
@@ -344,7 +344,7 @@ struct SortSessionView: View {
                 }
             } label: {
                 Image(systemName: vm.isMultiSelectActive ? "rectangle.stack.fill" : "rectangle.stack")
-                    .frame(width: 44, height: 44)
+                    .frame(width: 44, height: 36)
                     .foregroundStyle(vm.isMultiSelectActive ? Color.accentColor : Color.primary)
             }
         }

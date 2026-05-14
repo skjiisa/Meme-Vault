@@ -22,7 +22,7 @@ struct UpcomingItemsView: View {
                 .animation(.easeInOut(duration: 0.3), value: assetIDs)
             }
             .scrollIndicators(.hidden)
-            .frame(height: 48)
+            .frame(height: 44)
         }
     }
 }

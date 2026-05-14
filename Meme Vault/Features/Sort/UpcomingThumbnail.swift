@@ -8,7 +8,7 @@ struct UpcomingThumbnail: View {
 
     var body: some View {
         Color(.tertiarySystemFill)
-            .frame(width: 44, height: 44)
+            .frame(width: 36, height: 36)
             .overlay {
                 if let thumbnail {
                     Image(uiImage: thumbnail)
