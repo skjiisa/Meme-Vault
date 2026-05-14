@@ -174,9 +174,10 @@ struct SortSessionView: View {
 
     @ViewBuilder
     private func albumList(vm: SortSessionViewModel) -> some View {
+        let infos = albumInfos(refreshTick: vm.albumRefreshTick)
         ScrollView {
             LazyVGrid(columns: albumColumns, spacing: 12) {
-                ForEach(albumInfos, id: \.id) { info in
+                ForEach(infos, id: \.id) { info in
                     let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
                     Button {
                         Task { await vm.toggleAlbum(info.id) }
@@ -184,7 +185,7 @@ struct SortSessionView: View {
                         AlbumGridCell(
                             albumID: info.id,
                             title: info.title,
-                            count: info.estimatedAssetCount,
+                            count: info.assetCount,
                             isMember: isMember,
                             refreshTrigger: vm.albumRefreshTick
                         )
@@ -199,7 +200,7 @@ struct SortSessionView: View {
                         AlbumGridCell(
                             albumID: info.id,
                             title: info.title,
-                            count: info.estimatedAssetCount,
+                            count: info.assetCount,
                             isMember: isMember,
                             refreshTrigger: vm.albumRefreshTick
                         )
@@ -232,6 +233,7 @@ struct SortSessionView: View {
                 }
             }
             .padding(.horizontal)
+            .animation(.easeInOut(duration: 0.25), value: infos.map(\.id))
             .animation(.easeInOut(duration: 0.25), value: vm.extraAlbumIDs)
             .animation(.easeInOut(duration: 0.25), value: vm.isMultiSelectActive)
         }
@@ -248,18 +250,15 @@ struct SortSessionView: View {
         return collections.map { AlbumInfo(collection: $0) }
     }
 
-    private var albumInfos: [AlbumInfo] {
+    private func albumInfos(refreshTick: Int) -> [AlbumInfo] {
+        _ = refreshTick
         let collections = AlbumService.collections(for: context.albumLocalIDs)
         let byID = Dictionary(uniqueKeysWithValues: collections.map {
             ($0.localIdentifier, AlbumInfo(collection: $0))
         })
         var infos = context.albumLocalIDs.compactMap { byID[$0] }
         if context.autoSortAlbumsByCount {
-            infos.sort { lhs, rhs in
-                let lCount = lhs.estimatedAssetCount == NSNotFound ? 0 : lhs.estimatedAssetCount
-                let rCount = rhs.estimatedAssetCount == NSNotFound ? 0 : rhs.estimatedAssetCount
-                return lCount > rCount
-            }
+            infos.sort { $0.assetCount > $1.assetCount }
         }
         return infos
     }

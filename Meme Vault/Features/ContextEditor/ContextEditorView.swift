@@ -165,8 +165,8 @@ struct ContextEditorView: View {
                             .foregroundStyle(.secondary)
                         Text(info.title)
                         Spacer()
-                        if autoSortByCount, info.estimatedAssetCount != NSNotFound {
-                            Text("^[\(info.estimatedAssetCount) photo](inflect: true)")
+                        if autoSortByCount {
+                            Text("^[\(info.assetCount) photo](inflect: true)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -251,11 +251,7 @@ struct ContextEditorView: View {
         })
         var infos = albumOrder.compactMap { byID[$0] }
         if autoSortByCount {
-            infos.sort { lhs, rhs in
-                let lCount = lhs.estimatedAssetCount == NSNotFound ? 0 : lhs.estimatedAssetCount
-                let rCount = rhs.estimatedAssetCount == NSNotFound ? 0 : rhs.estimatedAssetCount
-                return lCount > rCount
-            }
+            infos.sort { $0.assetCount > $1.assetCount }
         }
         return infos
     }

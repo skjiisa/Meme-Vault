@@ -12,12 +12,12 @@ import Photos
 struct AlbumInfo: Identifiable, Hashable, Sendable {
     let id: String          // PHAssetCollection.localIdentifier
     let title: String
-    let estimatedAssetCount: Int
+    let assetCount: Int
 
     init(collection: PHAssetCollection) {
         self.id = collection.localIdentifier
         self.title = collection.localizedTitle ?? "Untitled Album"
-        self.estimatedAssetCount = collection.estimatedAssetCount
+        self.assetCount = PHAsset.fetchAssets(in: collection, options: nil).count
     }
 }
 
