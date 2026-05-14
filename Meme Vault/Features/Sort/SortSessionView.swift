@@ -23,6 +23,7 @@ struct SortSessionView: View {
     @State private var showingContextEditor = false
     @State private var columnCount = 3
     @State private var hasAppeared = false
+    @State private var viewingAlbum: AlbumSheetItem?
 
     private var columnCountKey: String {
         "albumGridColumns_\(context.uuid.uuidString)"
@@ -129,7 +130,12 @@ struct SortSessionView: View {
                 )
             )
             .frame(height: 360)
-            .padding(.horizontal)
+
+            // Upcoming items preview
+            let upcomingIDs = Array(vm.queue.dropFirst(vm.index + 1).prefix(20))
+            UpcomingItemsView(assetIDs: upcomingIDs) { id in
+                vm.showAsset(id: id)
+            }
 
             // Control bar
             controlBar(vm: vm)
@@ -152,6 +158,9 @@ struct SortSessionView: View {
                     vm: vm
                 )
             }
+        }
+        .sheet(item: $viewingAlbum) { album in
+            AlbumContentsView(album: album)
         }
         .alert(
             "No Destination Album",
@@ -196,6 +205,11 @@ struct SortSessionView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("View Contents", systemImage: "photo.on.rectangle") {
+                            viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
+                        }
+                    }
                 }
                 ForEach(extraAlbumInfos(vm: vm), id: \.id) { info in
                     let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
@@ -211,6 +225,11 @@ struct SortSessionView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("View Contents", systemImage: "photo.on.rectangle") {
+                            viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
+                        }
+                    }
                     .transition(.opacity.combined(with: .offset(y: 20)))
                 }
                 if vm.isMultiSelectActive && hasNonContextAlbums {
