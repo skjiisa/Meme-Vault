@@ -20,6 +20,11 @@ struct SortSessionView: View {
     @State private var showUndoToast = false
     @State private var undoTimer: Task<Void, Never>?
     @State private var showExtraAlbumPicker = false
+    @State private var columnCount = 3
+
+    private var columnCountKey: String {
+        "albumGridColumns_\(context.uuid.uuidString)"
+    }
 
     var body: some View {
         Group {
@@ -42,6 +47,13 @@ struct SortSessionView: View {
             // External Photos changes — only act after first load.
             guard let vm, library.changeTick > 0 else { return }
             await vm.handleLibraryChange()
+        }
+        .onAppear {
+            let stored = UserDefaults.standard.object(forKey: columnCountKey) as? Int
+            columnCount = stored ?? 3
+        }
+        .onChange(of: columnCount) { _, newValue in
+            UserDefaults.standard.set(newValue, forKey: columnCountKey)
         }
     }
 
@@ -143,10 +155,9 @@ struct SortSessionView: View {
 
     // MARK: - Album grid
 
-    private let albumColumns = [
-        GridItem(.flexible(), spacing: 12),
-        GridItem(.flexible(), spacing: 12),
-    ]
+    private var albumColumns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: 12), count: columnCount)
+    }
 
     @ViewBuilder
     private func albumList(vm: SortSessionViewModel) -> some View {
@@ -179,7 +190,7 @@ struct SortSessionView: View {
                         )
                     }
                     .buttonStyle(.plain)
-                    .transition(.opacity.combined(with: .slide))
+                    .transition(.opacity.combined(with: .offset(y: 20)))
                 }
                 if vm.isMultiSelectActive && hasNonContextAlbums {
                     Button {
@@ -202,7 +213,7 @@ struct SortSessionView: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    .transition(.opacity.combined(with: .slide))
+                    .transition(.opacity.combined(with: .offset(y: 20)))
                 }
             }
             .padding(.horizontal)
@@ -258,6 +269,26 @@ struct SortSessionView: View {
             }
 
             Spacer()
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    columnCount = min(5, columnCount + 1)
+                }
+            } label: {
+                Image(systemName: "minus.magnifyingglass")
+                    .frame(width: 44, height: 44)
+            }
+            .disabled(columnCount >= 5)
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    columnCount = max(2, columnCount - 1)
+                }
+            } label: {
+                Image(systemName: "plus.magnifyingglass")
+                    .frame(width: 44, height: 44)
+            }
+            .disabled(columnCount <= 2)
 
             Button {
                 if vm.isMultiSelectActive {
