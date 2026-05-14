@@ -27,7 +27,7 @@ enum AssetSource {
     /// by default).
     static func queue(for context: OrgContext) -> AssetQueue {
         let opts = PHFetchOptions()
-        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
         // Default media types: images + videos. Audio is rarely in albums; skip.
         opts.predicate = NSPredicate(
             format: "mediaType == %d OR mediaType == %d",

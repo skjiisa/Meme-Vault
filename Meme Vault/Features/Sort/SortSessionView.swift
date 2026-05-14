@@ -172,7 +172,8 @@ struct SortSessionView: View {
                             albumID: info.id,
                             title: info.title,
                             count: info.estimatedAssetCount,
-                            isMember: isMember
+                            isMember: isMember,
+                            refreshTrigger: vm.albumRefreshTick
                         )
                     }
                     .buttonStyle(.plain)
@@ -186,7 +187,8 @@ struct SortSessionView: View {
                             albumID: info.id,
                             title: info.title,
                             count: info.estimatedAssetCount,
-                            isMember: isMember
+                            isMember: isMember,
+                            refreshTrigger: vm.albumRefreshTick
                         )
                     }
                     .buttonStyle(.plain)
@@ -411,6 +413,7 @@ private struct ExtraAlbumSheet: View {
                 vm.extraAlbumIDs.insert(album.id)
             }
             vm.recomputeMemberships()
+            vm.noteAlbumContentChanged()
             Haptics.tap()
         } catch {
             Haptics.warning()

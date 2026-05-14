@@ -23,6 +23,7 @@ struct RootView: View {
     @State private var showingContextList = false
     @State private var showingDebugConfirm = false
     @State private var debugMessage: String?
+    @State private var sessionResetTick = 0
     @State private var selectedContext: OrgContext?
     @State private var pendingContext: OrgContext?
 
@@ -60,7 +61,7 @@ struct RootView: View {
                     AuthorizationGateView()
                 } else if let ctx = displayedContext {
                     SortSessionView(context: ctx)
-                        .id(ctx.persistentModelID)
+                        .id("\(ctx.uuid.uuidString)-\(sessionResetTick)")
                 } else {
                     // No contexts yet — will be created momentarily by .task
                     ProgressView("Setting up…")
@@ -178,6 +179,7 @@ struct RootView: View {
                 }
             }
             try? modelContext.save()
+            sessionResetTick += 1
             debugMessage = "Album memberships & skips cleared"
         } catch {
             debugMessage = "Failed: \(error.localizedDescription)"
