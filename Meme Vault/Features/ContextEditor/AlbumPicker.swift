@@ -127,8 +127,8 @@ struct AlbumPicker: View {
     private func rowLabel(_ album: AlbumInfo) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(album.title)
-            if album.estimatedAssetCount != NSNotFound {
-                Text("\(album.estimatedAssetCount) item\(album.estimatedAssetCount == 1 ? "" : "s")")
+            if album.assetCount > 0 {
+                Text("^[\(album.assetCount) item](inflect: true)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

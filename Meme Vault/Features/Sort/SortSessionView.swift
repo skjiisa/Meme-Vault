@@ -20,6 +20,13 @@ struct SortSessionView: View {
     @State private var showUndoToast = false
     @State private var undoTimer: Task<Void, Never>?
     @State private var showExtraAlbumPicker = false
+    @State private var showingContextEditor = false
+    @State private var columnCount = 3
+    @State private var hasAppeared = false
+
+    private var columnCountKey: String {
+        "albumGridColumns_\(context.uuid.uuidString)"
+    }
 
     var body: some View {
         Group {
@@ -32,6 +39,18 @@ struct SortSessionView: View {
         }
         .navigationTitle(context.name.isEmpty ? "Sort" : context.name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Edit Context", systemImage: "slider.horizontal.3") {
+                    showingContextEditor = true
+                }
+            }
+        }
+        .sheet(isPresented: $showingContextEditor, onDismiss: {
+            Task { await vm?.rebuildQueue() }
+        }) {
+            ContextEditorView(mode: .edit(context))
+        }
         .task {
             if vm == nil {
                 vm = SortSessionViewModel(context: context, modelContext: modelContext)
@@ -42,6 +61,17 @@ struct SortSessionView: View {
             // External Photos changes — only act after first load.
             guard let vm, library.changeTick > 0 else { return }
             await vm.handleLibraryChange()
+        }
+        .onAppear {
+            let stored = UserDefaults.standard.object(forKey: columnCountKey) as? Int
+            columnCount = stored ?? 3
+            if hasAppeared {
+                Task { await vm?.rebuildQueue() }
+            }
+            hasAppeared = true
+        }
+        .onChange(of: columnCount) { _, newValue in
+            UserDefaults.standard.set(newValue, forKey: columnCountKey)
         }
     }
 
@@ -141,50 +171,77 @@ struct SortSessionView: View {
         }
     }
 
-    // MARK: - Flat album list
+    // MARK: - Album grid
+
+    private var albumColumns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: 12), count: columnCount)
+    }
 
     @ViewBuilder
     private func albumList(vm: SortSessionViewModel) -> some View {
+        let infos = albumInfos(refreshTick: vm.albumRefreshTick)
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 8) {
-                ForEach(albumInfos, id: \.id) { info in
-                    let membership = vm.memberships.first { $0.id == info.id }
-                    let isMember = membership?.isMember ?? false
-                    albumRow(info: info, isMember: isMember, vm: vm)
+            LazyVGrid(columns: albumColumns, spacing: 12) {
+                ForEach(infos, id: \.id) { info in
+                    let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
+                    Button {
+                        Task { await vm.toggleAlbum(info.id) }
+                    } label: {
+                        AlbumGridCell(
+                            albumID: info.id,
+                            title: info.title,
+                            count: info.assetCount,
+                            isMember: isMember,
+                            refreshTrigger: vm.albumRefreshTick
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
                 ForEach(extraAlbumInfos(vm: vm), id: \.id) { info in
-                    let membership = vm.memberships.first { $0.id == info.id }
-                    let isMember = membership?.isMember ?? false
-                    albumRow(info: info, isMember: isMember, vm: vm)
-                        .transition(.opacity.combined(with: .slide))
+                    let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
+                    Button {
+                        Task { await vm.toggleAlbum(info.id) }
+                    } label: {
+                        AlbumGridCell(
+                            albumID: info.id,
+                            title: info.title,
+                            count: info.assetCount,
+                            isMember: isMember,
+                            refreshTrigger: vm.albumRefreshTick
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .transition(.opacity.combined(with: .offset(y: 20)))
                 }
                 if vm.isMultiSelectActive && hasNonContextAlbums {
                     Button {
                         showExtraAlbumPicker = true
                     } label: {
-                        HStack {
-                            Image(systemName: "plus.circle")
-                                .foregroundStyle(Color.accentColor)
+                        VStack(alignment: .leading, spacing: 6) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 12)
+                                    .fill(Color(.tertiarySystemFill))
+                                Image(systemName: "plus.circle")
+                                    .font(.title2)
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                            .aspectRatio(1, contentMode: .fit)
                             Text("Other Albums")
-                                .foregroundStyle(.primary)
-                            Spacer()
+                                .font(.subheadline.weight(.medium))
+                                .lineLimit(1)
+                            Text(" ")
+                                .font(.caption2)
                         }
-                        .padding(.vertical, 8)
-                        .padding(.horizontal, 12)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10)
-                                .fill(Color(.tertiarySystemFill))
-                        )
                     }
                     .buttonStyle(.plain)
-                    .transition(.opacity.combined(with: .slide))
+                    .transition(.opacity.combined(with: .offset(y: 20)))
                 }
             }
             .padding(.horizontal)
+            .animation(.easeInOut(duration: 0.25), value: infos.map(\.id))
             .animation(.easeInOut(duration: 0.25), value: vm.extraAlbumIDs)
             .animation(.easeInOut(duration: 0.25), value: vm.isMultiSelectActive)
         }
-        .frame(maxHeight: 280)
     }
 
     private var hasNonContextAlbums: Bool {
@@ -198,35 +255,17 @@ struct SortSessionView: View {
         return collections.map { AlbumInfo(collection: $0) }
     }
 
-    private var albumInfos: [AlbumInfo] {
+    private func albumInfos(refreshTick: Int) -> [AlbumInfo] {
+        _ = refreshTick
         let collections = AlbumService.collections(for: context.albumLocalIDs)
         let byID = Dictionary(uniqueKeysWithValues: collections.map {
             ($0.localIdentifier, AlbumInfo(collection: $0))
         })
-        return context.albumLocalIDs.compactMap { byID[$0] }
-    }
-
-    private func albumRow(info: AlbumInfo, isMember: Bool, vm: SortSessionViewModel) -> some View {
-        Button {
-            Task { await vm.toggleAlbum(info.id) }
-        } label: {
-            HStack {
-                Image(systemName: isMember ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isMember ? Color.accentColor : Color.secondary)
-                Text(info.title)
-                    .foregroundStyle(.primary)
-                Spacer()
-            }
-            .padding(.vertical, 8)
-            .padding(.horizontal, 12)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(isMember
-                          ? Color.accentColor.opacity(0.12)
-                          : Color(.tertiarySystemFill))
-            )
+        var infos = context.albumLocalIDs.compactMap { byID[$0] }
+        if context.autoSortAlbumsByCount {
+            infos.sort { $0.assetCount > $1.assetCount }
         }
-        .buttonStyle(.plain)
+        return infos
     }
 
     // MARK: - Control bar
@@ -257,6 +296,26 @@ struct SortSessionView: View {
             }
 
             Spacer()
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    columnCount = min(5, columnCount + 1)
+                }
+            } label: {
+                Image(systemName: "minus.magnifyingglass")
+                    .frame(width: 44, height: 44)
+            }
+            .disabled(columnCount >= 5)
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    columnCount = max(2, columnCount - 1)
+                }
+            } label: {
+                Image(systemName: "plus.magnifyingglass")
+                    .frame(width: 44, height: 44)
+            }
+            .disabled(columnCount <= 2)
 
             Button {
                 if vm.isMultiSelectActive {
@@ -379,6 +438,7 @@ private struct ExtraAlbumSheet: View {
                 vm.extraAlbumIDs.insert(album.id)
             }
             vm.recomputeMemberships()
+            vm.noteAlbumContentChanged()
             Haptics.tap()
         } catch {
             Haptics.warning()

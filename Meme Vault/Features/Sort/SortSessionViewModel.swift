@@ -40,6 +40,9 @@ final class SortSessionViewModel {
     /// Shown when the user tries to save with only extra (non-context) albums selected.
     var showExtraOnlyAlert: Bool = false
 
+    /// Incremented after every album membership change so cells can reload previews.
+    private(set) var albumRefreshTick: Int = 0
+
     enum SortAction {
         case skipped(localID: String)
         case queuedDelete(localID: String)
@@ -189,11 +192,13 @@ final class SortSessionViewModel {
             if isMember {
                 try await AlbumService.remove(asset, from: collection)
                 evaluator.noteRemoved(asset: asset.localIdentifier, from: albumLocalID)
+                albumRefreshTick += 1
                 recomputeMemberships()
                 Haptics.tap()
             } else {
                 try await AlbumService.add(asset, to: collection)
                 evaluator.noteAdded(asset: asset.localIdentifier, to: albumLocalID)
+                albumRefreshTick += 1
                 if !isMultiSelectActive && !wasSatisfied {
                     let newMemberships = evaluator.albumMemberships(for: asset, in: context)
                     if newMemberships.contains(where: \.isMember) {
@@ -209,6 +214,10 @@ final class SortSessionViewModel {
             Haptics.warning()
             print("toggleAlbum failed: \(error)")
         }
+    }
+
+    func noteAlbumContentChanged() {
+        albumRefreshTick += 1
     }
 
     func deactivateMultiSelect() async {
