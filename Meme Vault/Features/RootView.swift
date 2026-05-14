@@ -77,13 +77,23 @@ struct RootView: View {
                             Image(systemName: "list.bullet")
                         }
                         NavigationLink {
-                            PendingDeletesView()
+                            PhotoCollectionView(mode: .trash)
                         } label: {
                             let count = pendingDeletes.count
                             Label("Trash\(count > 0 ? " (\(count))" : "")",
                                   systemImage: "trash")
                         }
                         .disabled(pendingDeletes.isEmpty)
+                        if let ctx = displayedContext {
+                            NavigationLink {
+                                PhotoCollectionView(mode: .skipped(ctx))
+                            } label: {
+                                let count = ctx.skips.count
+                                Label("Skipped\(count > 0 ? " (\(count))" : "")",
+                                      systemImage: "checkmark.circle")
+                            }
+                            .disabled(ctx.skips.isEmpty)
+                        }
                     }
                 }
                 #if DEBUG

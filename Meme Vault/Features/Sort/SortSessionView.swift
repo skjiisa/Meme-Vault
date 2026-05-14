@@ -22,6 +22,7 @@ struct SortSessionView: View {
     @State private var showExtraAlbumPicker = false
     @State private var showingContextEditor = false
     @State private var columnCount = 3
+    @State private var hasAppeared = false
 
     private var columnCountKey: String {
         "albumGridColumns_\(context.uuid.uuidString)"
@@ -64,6 +65,10 @@ struct SortSessionView: View {
         .onAppear {
             let stored = UserDefaults.standard.object(forKey: columnCountKey) as? Int
             columnCount = stored ?? 3
+            if hasAppeared {
+                Task { await vm?.rebuildQueue() }
+            }
+            hasAppeared = true
         }
         .onChange(of: columnCount) { _, newValue in
             UserDefaults.standard.set(newValue, forKey: columnCountKey)
