@@ -80,15 +80,15 @@ private struct PhotoPage: View {
             switch phase {
             case .loaded:
                 if let image {
-                    Color.clear
+                    Color.black
                         .overlay {
                             Image(uiImage: image)
                                 .resizable()
                                 .scaledToFill()
                         }
                         .clipped()
-                        .blur(radius: 24)
-                        .opacity(0.5)
+                        .blur(radius: 20)
+                        .opacity(0.8)
 
                     Image(uiImage: image)
                         .resizable()
