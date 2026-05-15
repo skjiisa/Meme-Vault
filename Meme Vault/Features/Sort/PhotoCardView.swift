@@ -2,41 +2,38 @@
 //  PhotoCardView.swift
 //  Meme Vault
 //
-//  Horizontally paged carousel over the sort queue. Backed by a SwiftUI
-//  `ScrollView` with view-aligned paging, so it scrolls with native physics
-//  (rubber-banding, deceleration, flick-through) and only realises the pages
-//  near the viewport via `LazyHStack` — fine for a queue of thousands. The
-//  centred page is two-way-bound to the view model through `currentID`.
+//  Horizontally paged carousel over the sort queue with peek of adjacent items.
+//  Backed by a SwiftUI ScrollView with view-aligned paging, so it scrolls with
+//  native physics (rubber-banding, deceleration, flick-through) and only realises
+//  the pages near the viewport via LazyHStack.
 //
 
 import SwiftUI
 import Photos
-import UIKit
 
 struct PhotoCardView: View {
-    /// All asset local IDs in the queue, in display order.
     let assetIDs: [String]
-    /// Local ID of the page currently centred. User swipes write to it;
-    /// programmatic changes (Next / Back buttons, undo) scroll the carousel.
     @Binding var currentID: String?
 
     @Environment(\.displayScale) private var displayScale
 
-    /// How many neighbours on each side of the visible page to keep pre-decoded.
+    private let margin: Double = 24
+    private let spacing: Double = 10
     private let prefetchAhead = 3
     private let prefetchBehind = 1
 
     var body: some View {
         GeometryReader { geo in
-            let pageSize = geo.size
-            let pixelSize = CGSize(width: pageSize.width * displayScale,
-                                   height: pageSize.height * displayScale)
+            let pageWidth = geo.size.width - 2 * margin
+            let pageHeight = geo.size.height
+            let pixelSize = CGSize(width: pageWidth * displayScale,
+                                   height: pageHeight * displayScale)
 
             ScrollView(.horizontal) {
-                LazyHStack(spacing: 0) {
+                LazyHStack(spacing: spacing) {
                     ForEach(assetIDs, id: \.self) { id in
                         PhotoPage(assetID: id, targetSize: pixelSize)
-                            .frame(width: pageSize.width, height: pageSize.height)
+                            .frame(width: pageWidth, height: pageHeight)
                     }
                 }
                 .scrollTargetLayout()
@@ -44,6 +41,7 @@ struct PhotoCardView: View {
             .scrollTargetBehavior(.viewAligned)
             .scrollPosition(id: $currentID)
             .scrollIndicators(.hidden)
+            .contentMargins(.horizontal, margin)
             .onAppear { updatePrefetchWindow(targetSize: pixelSize) }
             .onChange(of: currentID) { _, _ in updatePrefetchWindow(targetSize: pixelSize) }
             .onChange(of: assetIDs) { _, _ in updatePrefetchWindow(targetSize: pixelSize) }
@@ -65,8 +63,6 @@ struct PhotoCardView: View {
 
 // MARK: - Single page
 
-/// One page of the carousel: resolves its `PHAsset` lazily, then loads a
-/// display-quality image. Sizing is owned by the parent.
 private struct PhotoPage: View {
     let assetID: String
     let targetSize: CGSize
@@ -84,10 +80,19 @@ private struct PhotoPage: View {
             switch phase {
             case .loaded:
                 if let image {
+                    Color.black
+                        .overlay {
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFill()
+                        }
+                        .clipped()
+                        .blur(radius: 20)
+                        .opacity(0.8)
+
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFit()
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
                 }
             case .loading:
                 ProgressView()
@@ -97,7 +102,7 @@ private struct PhotoPage: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(.horizontal, 4)   // a hair of gutter between adjacent cards mid-swipe
+        .clipShape(RoundedRectangle(cornerRadius: 16))
         .task(id: assetID) {
             image = nil
             phase = .loading

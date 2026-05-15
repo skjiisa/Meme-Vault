@@ -23,6 +23,7 @@ struct SortSessionView: View {
     @State private var showingContextEditor = false
     @State private var columnCount = 3
     @State private var hasAppeared = false
+    @State private var viewingAlbum: AlbumSheetItem?
 
     private var columnCountKey: String {
         "albumGridColumns_\(context.uuid.uuidString)"
@@ -105,7 +106,7 @@ struct SortSessionView: View {
 
     @ViewBuilder
     private func sortContent(vm: SortSessionViewModel) -> some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 6) {
             // Progress
             HStack {
                 Text(vm.progressText)
@@ -128,8 +129,13 @@ struct SortSessionView: View {
                     set: { id in if let id { vm.showAsset(id: id) } }
                 )
             )
-            .frame(height: 360)
-            .padding(.horizontal)
+            .frame(height: 300)
+
+            // Upcoming items preview
+            let upcomingIDs = Array(vm.queue.dropFirst(vm.index + 1).prefix(20))
+            UpcomingItemsView(assetIDs: upcomingIDs) { id in
+                vm.showAsset(id: id)
+            }
 
             // Control bar
             controlBar(vm: vm)
@@ -137,7 +143,7 @@ struct SortSessionView: View {
             // Album list
             albumList(vm: vm)
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 4)
         .overlay(alignment: .bottom) {
             if showUndoToast, let action = vm.lastAction {
                 undoToast(action: action, vm: vm)
@@ -152,6 +158,9 @@ struct SortSessionView: View {
                     vm: vm
                 )
             }
+        }
+        .sheet(item: $viewingAlbum) { album in
+            AlbumContentsView(album: album)
         }
         .alert(
             "No Destination Album",
@@ -181,7 +190,7 @@ struct SortSessionView: View {
     private func albumList(vm: SortSessionViewModel) -> some View {
         let infos = albumInfos(refreshTick: vm.albumRefreshTick)
         ScrollView {
-            LazyVGrid(columns: albumColumns, spacing: 12) {
+            LazyVGrid(columns: albumColumns, spacing: 8) {
                 ForEach(infos, id: \.id) { info in
                     let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
                     Button {
@@ -196,6 +205,11 @@ struct SortSessionView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("View Contents", systemImage: "photo.on.rectangle") {
+                            viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
+                        }
+                    }
                 }
                 ForEach(extraAlbumInfos(vm: vm), id: \.id) { info in
                     let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
@@ -211,6 +225,11 @@ struct SortSessionView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("View Contents", systemImage: "photo.on.rectangle") {
+                            viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
+                        }
+                    }
                     .transition(.opacity.combined(with: .offset(y: 20)))
                 }
                 if vm.isMultiSelectActive && hasNonContextAlbums {
@@ -276,7 +295,7 @@ struct SortSessionView: View {
                 Task { await vm.back() }
             } label: {
                 Image(systemName: "arrow.uturn.backward")
-                    .frame(width: 44, height: 44)
+                    .frame(width: 44, height: 36)
             }
             .disabled(vm.index == 0)
 
@@ -284,7 +303,7 @@ struct SortSessionView: View {
                 Task { await vm.queueDelete(); showToast() }
             } label: {
                 Image(systemName: "trash")
-                    .frame(width: 44, height: 44)
+                    .frame(width: 44, height: 36)
                     .foregroundStyle(.red)
             }
 
@@ -292,7 +311,7 @@ struct SortSessionView: View {
                 Task { await vm.skip(); showToast() }
             } label: {
                 Image(systemName: "arrow.right.to.line")
-                    .frame(width: 44, height: 44)
+                    .frame(width: 44, height: 36)
             }
 
             Spacer()
@@ -303,7 +322,7 @@ struct SortSessionView: View {
                 }
             } label: {
                 Image(systemName: "minus.magnifyingglass")
-                    .frame(width: 44, height: 44)
+                    .frame(width: 44, height: 36)
             }
             .disabled(columnCount >= 5)
 
@@ -313,7 +332,7 @@ struct SortSessionView: View {
                 }
             } label: {
                 Image(systemName: "plus.magnifyingglass")
-                    .frame(width: 44, height: 44)
+                    .frame(width: 44, height: 36)
             }
             .disabled(columnCount <= 2)
 
@@ -325,7 +344,7 @@ struct SortSessionView: View {
                 }
             } label: {
                 Image(systemName: vm.isMultiSelectActive ? "rectangle.stack.fill" : "rectangle.stack")
-                    .frame(width: 44, height: 44)
+                    .frame(width: 44, height: 36)
                     .foregroundStyle(vm.isMultiSelectActive ? Color.accentColor : Color.primary)
             }
         }
