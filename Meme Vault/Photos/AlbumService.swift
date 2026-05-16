@@ -151,6 +151,15 @@ enum AlbumService {
         }
     }
 
+    // MARK: - Favorite
+
+    static func performFavorite(asset: PHAsset, favorite: Bool) async throws {
+        try await performChanges {
+            let req = PHAssetChangeRequest(for: asset)
+            req.isFavorite = favorite
+        }
+    }
+
     // MARK: - Creation
 
     /// Creates a new user album with the given title and returns its local ID.

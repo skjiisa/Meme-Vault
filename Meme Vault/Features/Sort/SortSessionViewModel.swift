@@ -25,6 +25,9 @@ final class SortSessionViewModel {
     /// Current asset (resolved from localID).
     private(set) var currentAsset: PHAsset?
 
+    /// Whether the current asset is favorited.
+    private(set) var isFavorite: Bool = false
+
     /// Per-album membership for the current asset.
     private(set) var memberships: [AlbumMembership] = []
 
@@ -193,6 +196,7 @@ final class SortSessionViewModel {
             multiSelectRemoves = []
         }
         currentAsset = newAsset
+        isFavorite = newAsset?.isFavorite ?? false
         recomputeMemberships()
     }
 
@@ -242,6 +246,20 @@ final class SortSessionViewModel {
     var progressText: String {
         let done = max(0, totalAssetsInPool - queue.count + index)
         return "\(done + 1) of \(totalAssetsInPool)"
+    }
+
+    // MARK: - Favorite
+
+    func toggleFavorite() async {
+        guard let asset = currentAsset else { return }
+        let newValue = !isFavorite
+        do {
+            try await AlbumService.performFavorite(asset: asset, favorite: newValue)
+            isFavorite = newValue
+            Haptics.tap()
+        } catch {
+            Haptics.warning()
+        }
     }
 
     // MARK: - Album toggling

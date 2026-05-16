@@ -240,7 +240,7 @@ struct SortSessionView: View {
     // MARK: - Control bar
 
     private func controlBar(vm: SortSessionViewModel) -> some View {
-        HStack(spacing: 16) {
+        HStack {
             Button {
                 Task { await vm.undo(); showUndoToast = false }
             } label: {
@@ -248,6 +248,8 @@ struct SortSessionView: View {
                     .frame(width: 44, height: 36)
             }
             .disabled(!vm.canUndo)
+
+            Spacer()
 
             Button {
                 Task { await vm.queueDelete(); showToast() }
@@ -257,11 +259,23 @@ struct SortSessionView: View {
                     .foregroundStyle(.red)
             }
 
+            Spacer()
+
             Button {
                 Task { await vm.skip(); showToast() }
             } label: {
                 Image(systemName: "arrow.right.to.line")
                     .frame(width: 44, height: 36)
+            }
+
+            Spacer()
+
+            Button {
+                Task { await vm.toggleFavorite() }
+            } label: {
+                Image(systemName: vm.isFavorite ? "heart.fill" : "heart")
+                    .frame(width: 44, height: 36)
+                    .foregroundStyle(vm.isFavorite ? .yellow : .secondary)
             }
 
             Spacer()
@@ -275,6 +289,8 @@ struct SortSessionView: View {
                     .frame(width: 44, height: 36)
             }
             .disabled(columnCount >= 5)
+
+            Spacer()
 
             Button {
                 withAnimation(.easeInOut(duration: 0.2)) {
