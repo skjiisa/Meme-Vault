@@ -10,6 +10,7 @@
 
 import SwiftUI
 import Photos
+import AVKit
 
 struct PhotoCardView: View {
     let assetIDs: [String]
@@ -69,6 +70,8 @@ private struct PhotoPage: View {
 
     @State private var image: UIImage?
     @State private var phase: Phase = .loading
+    @State private var isVideo = false
+    @State private var player: AVPlayer?
 
     private enum Phase { case loading, loaded, missing }
 
@@ -79,7 +82,9 @@ private struct PhotoPage: View {
 
             switch phase {
             case .loaded:
-                if let image {
+                if let player {
+                    VideoPlayer(player: player)
+                } else if let image {
                     Color.black
                         .overlay {
                             Image(uiImage: image)
@@ -93,6 +98,18 @@ private struct PhotoPage: View {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFit()
+
+                    if isVideo {
+                        Button {
+                            Task { await startPlayback() }
+                        } label: {
+                            Image(systemName: "play.circle.fill")
+                                .font(.system(size: 64))
+                                .symbolRenderingMode(.hierarchical)
+                                .foregroundStyle(.white)
+                                .shadow(radius: 4)
+                        }
+                    }
                 }
             case .loading:
                 ProgressView()
@@ -104,16 +121,39 @@ private struct PhotoPage: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .task(id: assetID) {
+            player?.pause()
+            player = nil
             image = nil
             phase = .loading
+            isVideo = false
             guard let asset = AlbumService.asset(for: assetID) else {
                 phase = .missing
                 return
             }
+            isVideo = asset.mediaType == .video
             let loaded = await ImageLoader.shared.loadDisplayImage(for: asset, targetSize: targetSize)
             guard !Task.isCancelled else { return }
             image = loaded
             phase = (loaded == nil) ? .missing : .loaded
+        }
+    }
+
+    private func startPlayback() async {
+        guard let asset = AlbumService.asset(for: assetID) else { return }
+        guard let item = await requestPlayerItem(for: asset) else { return }
+        let avPlayer = AVPlayer(playerItem: item)
+        player = avPlayer
+        avPlayer.play()
+    }
+
+    private func requestPlayerItem(for asset: PHAsset) async -> AVPlayerItem? {
+        await withCheckedContinuation { cont in
+            let options = PHVideoRequestOptions()
+            options.isNetworkAccessAllowed = true
+            options.deliveryMode = .automatic
+            PHImageManager.default().requestPlayerItem(forVideo: asset, options: options) { item, _ in
+                cont.resume(returning: item)
+            }
         }
     }
 }
