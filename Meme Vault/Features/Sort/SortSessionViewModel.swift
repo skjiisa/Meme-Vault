@@ -59,9 +59,12 @@ final class SortSessionViewModel {
     private(set) var albumRefreshVersions: [String: Int] = [:]
 
     enum SortAction {
+        case sorted(localID: String, albumID: String)
         case skipped(localID: String)
         case queuedDelete(localID: String)
     }
+
+    var canUndo: Bool { lastAction != nil }
 
     // MARK: - Dependencies
 
@@ -260,6 +263,7 @@ final class SortSessionViewModel {
                 if !isMultiSelectActive && !wasSatisfied {
                     let newMemberships = evaluator.albumMemberships(for: asset, in: context)
                     if newMemberships.contains(where: \.isMember) {
+                        lastAction = .sorted(localID: asset.localIdentifier, albumID: albumLocalID)
                         Haptics.tap()
                         await advance(removingCurrent: true)
                         return
@@ -411,6 +415,37 @@ final class SortSessionViewModel {
         queue.insert(id, at: index)
         lastAction = nil
         refreshCurrent()
+    }
+
+    // MARK: - Undo (sort)
+
+    func undoSort() async {
+        guard case .sorted(let id, let albumID) = lastAction else { return }
+        guard let asset = AlbumService.asset(for: id),
+              let collection = AlbumService.collection(for: albumID) else {
+            lastAction = nil
+            return
+        }
+        do {
+            try await AlbumService.remove(asset, from: collection, assumeMember: true)
+            evaluator.noteRemoved(asset: id, from: albumID)
+            applyLocalMembershipChange(albumID: albumID, delta: -1)
+        } catch {
+            // Best-effort; still restore to queue so the user can re-sort.
+        }
+        queue.insert(id, at: index)
+        lastAction = nil
+        refreshCurrent()
+    }
+
+    /// Unified undo — dispatches to the appropriate handler based on `lastAction`.
+    func undo() async {
+        switch lastAction {
+        case .sorted: await undoSort()
+        case .skipped: await undoSkip()
+        case .queuedDelete: await undoQueueDelete()
+        case nil: break
+        }
     }
 
     // MARK: - PhotoKit change handling

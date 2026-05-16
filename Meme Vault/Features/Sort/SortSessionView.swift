@@ -195,7 +195,10 @@ struct SortSessionView: View {
                 ForEach(infos, id: \.id) { info in
                     let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
                     Button {
-                        Task { await vm.toggleAlbum(info.id) }
+                        Task {
+                            await vm.toggleAlbum(info.id)
+                            if case .sorted = vm.lastAction { showToast() }
+                        }
                     } label: {
                         AlbumGridCell(
                             albumID: info.id,
@@ -215,7 +218,10 @@ struct SortSessionView: View {
                 ForEach(extras, id: \.id) { info in
                     let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
                     Button {
-                        Task { await vm.toggleAlbum(info.id) }
+                        Task {
+                            await vm.toggleAlbum(info.id)
+                            if case .sorted = vm.lastAction { showToast() }
+                        }
                     } label: {
                         AlbumGridCell(
                             albumID: info.id,
@@ -269,12 +275,12 @@ struct SortSessionView: View {
     private func controlBar(vm: SortSessionViewModel) -> some View {
         HStack(spacing: 16) {
             Button {
-                Task { await vm.back() }
+                Task { await vm.undo(); showUndoToast = false }
             } label: {
                 Image(systemName: "arrow.uturn.backward")
                     .frame(width: 44, height: 36)
             }
-            .disabled(vm.index == 0)
+            .disabled(!vm.canUndo)
 
             Button {
                 Task { await vm.queueDelete(); showToast() }
@@ -344,6 +350,7 @@ struct SortSessionView: View {
     private func undoToast(action: SortSessionViewModel.SortAction, vm: SortSessionViewModel) -> some View {
         let label: String = {
             switch action {
+            case .sorted: return "Sorted"
             case .skipped: return "Skipped"
             case .queuedDelete: return "Queued for deletion"
             }
@@ -353,10 +360,7 @@ struct SortSessionView: View {
             Spacer()
             Button("Undo") {
                 Task {
-                    switch action {
-                    case .skipped: await vm.undoSkip()
-                    case .queuedDelete: await vm.undoQueueDelete()
-                    }
+                    await vm.undo()
                     showUndoToast = false
                 }
             }
