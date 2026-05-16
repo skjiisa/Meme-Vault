@@ -35,13 +35,28 @@ final class SortSessionViewModel {
     var isMultiSelectActive: Bool = false
 
     /// Non-context albums selected via the "Other Albums" sheet for the current photo.
-    var extraAlbumIDs: Set<String> = []
+    private(set) var extraAlbumIDs: Set<String> = []
 
     /// Shown when the user tries to save with only extra (non-context) albums selected.
     var showExtraOnlyAlert: Bool = false
 
-    /// Incremented after every album membership change so cells can reload previews.
-    private(set) var albumRefreshTick: Int = 0
+    /// Cached snapshot of the context's destination albums. Recomputed on
+    /// queue rebuild (and on explicit refresh). Per-tap toggles patch this
+    /// list locally so the album grid doesn't have to re-fetch from PhotoKit.
+    private(set) var albumInfos: [AlbumInfo] = []
+
+    /// Cached snapshot of extra (non-context) albums currently surfaced in
+    /// the grid for the active asset.
+    private(set) var extraAlbumInfos: [AlbumInfo] = []
+
+    /// True iff there is at least one user album not already in the context.
+    /// Cached so we don't fetch the full album list on every body render.
+    private(set) var hasNonContextAlbums: Bool = false
+
+    /// Per-album refresh versions. The album grid cell observes the version
+    /// for its own album only — so a tap on one album doesn't force every
+    /// other cell to reload its thumbnails.
+    private(set) var albumRefreshVersions: [String: Int] = [:]
 
     enum SortAction {
         case skipped(localID: String)
@@ -118,8 +133,44 @@ final class SortSessionViewModel {
         } else {
             self.index = 0
         }
+
+        // Refresh cached album metadata (counts, titles) — done here rather
+        // than on every body recomputation so per-tap renders stay cheap.
+        refreshAlbumInfos()
+        refreshExtraAlbumInfos()
+        refreshHasNonContextAlbums()
+
         self.isLoading = false
         refreshCurrent()
+    }
+
+    /// Rebuilds the cached `albumInfos` from PhotoKit. Heavy — does one fetch
+    /// per destination album to read its count — so it's only called on
+    /// queue rebuild or after an external library change.
+    private func refreshAlbumInfos() {
+        let collections = AlbumService.collections(for: context.albumLocalIDs)
+        let byID = Dictionary(uniqueKeysWithValues: collections.map {
+            ($0.localIdentifier, AlbumInfo(collection: $0))
+        })
+        var infos = context.albumLocalIDs.compactMap { byID[$0] }
+        if context.autoSortAlbumsByCount {
+            infos.sort { $0.assetCount > $1.assetCount }
+        }
+        albumInfos = infos
+    }
+
+    private func refreshExtraAlbumInfos() {
+        guard !extraAlbumIDs.isEmpty else {
+            extraAlbumInfos = []
+            return
+        }
+        let collections = AlbumService.collections(for: Array(extraAlbumIDs))
+        extraAlbumInfos = collections.map { AlbumInfo(collection: $0) }
+    }
+
+    private func refreshHasNonContextAlbums() {
+        let contextIDs = Set(context.albumLocalIDs)
+        hasNonContextAlbums = AlbumService.listUserAlbums().contains { !contextIDs.contains($0.id) }
     }
 
     // MARK: - Current asset
@@ -129,12 +180,14 @@ final class SortSessionViewModel {
             currentAsset = nil
             memberships = []
             extraAlbumIDs = []
+            extraAlbumInfos = []
             return
         }
         let id = queue[index]
         let newAsset = AlbumService.asset(for: id)
         if newAsset?.localIdentifier != currentAsset?.localIdentifier {
             extraAlbumIDs = []
+            extraAlbumInfos = []
         }
         currentAsset = newAsset
         recomputeMemberships()
@@ -143,11 +196,12 @@ final class SortSessionViewModel {
     func recomputeMemberships() {
         guard let asset = currentAsset else { memberships = []; return }
         var result = evaluator.albumMemberships(for: asset, in: context)
+        // Use the evaluator's cache for extras too — it's lazily populated
+        // and patched on every add/remove, so this avoids per-tap PhotoKit
+        // fetches when there are extras pinned to the current asset.
         for albumID in extraAlbumIDs {
-            if let collection = AlbumService.collection(for: albumID) {
-                let isMember = AlbumService.isAsset(asset, memberOf: collection)
-                result.append(AlbumMembership(id: albumID, isMember: isMember))
-            }
+            let isMember = evaluator.members(of: albumID).contains(asset.localIdentifier)
+            result.append(AlbumMembership(id: albumID, isMember: isMember))
         }
         memberships = result
     }
@@ -186,19 +240,23 @@ final class SortSessionViewModel {
     func toggleAlbum(_ albumLocalID: String) async {
         guard let asset = currentAsset,
               let collection = AlbumService.collection(for: albumLocalID) else { return }
-        let isMember = AlbumService.isAsset(asset, memberOf: collection)
+        // Use the already-computed membership state instead of issuing another
+        // PhotoKit fetch. `memberships` is populated from the evaluator cache,
+        // which is patched in-place on every add/remove.
+        let isMember = memberships.first { $0.id == albumLocalID }?.isMember
+            ?? evaluator.members(of: albumLocalID).contains(asset.localIdentifier)
         let wasSatisfied = isSatisfied
         do {
             if isMember {
-                try await AlbumService.remove(asset, from: collection)
+                try await AlbumService.remove(asset, from: collection, assumeMember: true)
                 evaluator.noteRemoved(asset: asset.localIdentifier, from: albumLocalID)
-                albumRefreshTick += 1
+                applyLocalMembershipChange(albumID: albumLocalID, delta: -1)
                 recomputeMemberships()
                 Haptics.tap()
             } else {
-                try await AlbumService.add(asset, to: collection)
+                try await AlbumService.add(asset, to: collection, assumeNotMember: true)
                 evaluator.noteAdded(asset: asset.localIdentifier, to: albumLocalID)
-                albumRefreshTick += 1
+                applyLocalMembershipChange(albumID: albumLocalID, delta: +1)
                 if !isMultiSelectActive && !wasSatisfied {
                     let newMemberships = evaluator.albumMemberships(for: asset, in: context)
                     if newMemberships.contains(where: \.isMember) {
@@ -216,8 +274,50 @@ final class SortSessionViewModel {
         }
     }
 
-    func noteAlbumContentChanged() {
-        albumRefreshTick += 1
+    /// Patch cached album metadata after a successful add/remove. Bumps the
+    /// per-album refresh version (so only that one cell reloads thumbnails)
+    /// and updates the cached count locally.
+    private func applyLocalMembershipChange(albumID: String, delta: Int) {
+        albumRefreshVersions[albumID, default: 0] &+= 1
+        if let i = albumInfos.firstIndex(where: { $0.id == albumID }) {
+            albumInfos[i] = albumInfos[i].adjustingCount(by: delta)
+            if context.autoSortAlbumsByCount {
+                albumInfos.sort { $0.assetCount > $1.assetCount }
+            }
+        }
+        if let i = extraAlbumInfos.firstIndex(where: { $0.id == albumID }) {
+            extraAlbumInfos[i] = extraAlbumInfos[i].adjustingCount(by: delta)
+        }
+    }
+
+    /// Called by the "Other Albums" sheet after it added the current asset to
+    /// a non-context album. Patches the evaluator cache, updates cached lists,
+    /// and bumps the affected cell's refresh version.
+    func applyExtraAlbumAdded(albumID: String, asset: PHAsset) {
+        evaluator.noteAdded(asset: asset.localIdentifier, to: albumID)
+        extraAlbumIDs.insert(albumID)
+        if let i = extraAlbumInfos.firstIndex(where: { $0.id == albumID }) {
+            extraAlbumInfos[i] = extraAlbumInfos[i].adjustingCount(by: +1)
+        } else if let collection = AlbumService.collection(for: albumID) {
+            extraAlbumInfos.append(AlbumInfo(collection: collection))
+        }
+        if let i = albumInfos.firstIndex(where: { $0.id == albumID }) {
+            albumInfos[i] = albumInfos[i].adjustingCount(by: +1)
+        }
+        albumRefreshVersions[albumID, default: 0] &+= 1
+        recomputeMemberships()
+    }
+
+    /// Mirror of `applyExtraAlbumAdded` for removals.
+    func applyExtraAlbumRemoved(albumID: String, asset: PHAsset) {
+        evaluator.noteRemoved(asset: asset.localIdentifier, from: albumID)
+        extraAlbumIDs.remove(albumID)
+        extraAlbumInfos.removeAll { $0.id == albumID }
+        if let i = albumInfos.firstIndex(where: { $0.id == albumID }) {
+            albumInfos[i] = albumInfos[i].adjustingCount(by: -1)
+        }
+        albumRefreshVersions[albumID, default: 0] &+= 1
+        recomputeMemberships()
     }
 
     func deactivateMultiSelect() async {

@@ -188,7 +188,8 @@ struct SortSessionView: View {
 
     @ViewBuilder
     private func albumList(vm: SortSessionViewModel) -> some View {
-        let infos = albumInfos(refreshTick: vm.albumRefreshTick)
+        let infos = vm.albumInfos
+        let extras = vm.extraAlbumInfos
         ScrollView {
             LazyVGrid(columns: albumColumns, spacing: 8) {
                 ForEach(infos, id: \.id) { info in
@@ -201,7 +202,7 @@ struct SortSessionView: View {
                             title: info.title,
                             count: info.assetCount,
                             isMember: isMember,
-                            refreshTrigger: vm.albumRefreshTick
+                            refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
                         )
                     }
                     .buttonStyle(.plain)
@@ -211,7 +212,7 @@ struct SortSessionView: View {
                         }
                     }
                 }
-                ForEach(extraAlbumInfos(vm: vm), id: \.id) { info in
+                ForEach(extras, id: \.id) { info in
                     let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
                     Button {
                         Task { await vm.toggleAlbum(info.id) }
@@ -221,7 +222,7 @@ struct SortSessionView: View {
                             title: info.title,
                             count: info.assetCount,
                             isMember: isMember,
-                            refreshTrigger: vm.albumRefreshTick
+                            refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
                         )
                     }
                     .buttonStyle(.plain)
@@ -232,7 +233,7 @@ struct SortSessionView: View {
                     }
                     .transition(.opacity.combined(with: .offset(y: 20)))
                 }
-                if vm.isMultiSelectActive && hasNonContextAlbums {
+                if vm.isMultiSelectActive && vm.hasNonContextAlbums {
                     Button {
                         showExtraAlbumPicker = true
                     } label: {
@@ -261,30 +262,6 @@ struct SortSessionView: View {
             .animation(.easeInOut(duration: 0.25), value: vm.extraAlbumIDs)
             .animation(.easeInOut(duration: 0.25), value: vm.isMultiSelectActive)
         }
-    }
-
-    private var hasNonContextAlbums: Bool {
-        let contextIDs = Set(context.albumLocalIDs)
-        return AlbumService.listUserAlbums().contains { !contextIDs.contains($0.id) }
-    }
-
-    private func extraAlbumInfos(vm: SortSessionViewModel) -> [AlbumInfo] {
-        guard !vm.extraAlbumIDs.isEmpty else { return [] }
-        let collections = AlbumService.collections(for: Array(vm.extraAlbumIDs))
-        return collections.map { AlbumInfo(collection: $0) }
-    }
-
-    private func albumInfos(refreshTick: Int) -> [AlbumInfo] {
-        _ = refreshTick
-        let collections = AlbumService.collections(for: context.albumLocalIDs)
-        let byID = Dictionary(uniqueKeysWithValues: collections.map {
-            ($0.localIdentifier, AlbumInfo(collection: $0))
-        })
-        var infos = context.albumLocalIDs.compactMap { byID[$0] }
-        if context.autoSortAlbumsByCount {
-            infos.sort { $0.assetCount > $1.assetCount }
-        }
-        return infos
     }
 
     // MARK: - Control bar
@@ -448,16 +425,14 @@ private struct ExtraAlbumSheet: View {
         guard let collection = AlbumService.collection(for: album.id) else { return }
         do {
             if memberIDs.contains(album.id) {
-                try await AlbumService.remove(asset, from: collection)
+                try await AlbumService.remove(asset, from: collection, assumeMember: true)
                 memberIDs.remove(album.id)
-                vm.extraAlbumIDs.remove(album.id)
+                vm.applyExtraAlbumRemoved(albumID: album.id, asset: asset)
             } else {
-                try await AlbumService.add(asset, to: collection)
+                try await AlbumService.add(asset, to: collection, assumeNotMember: true)
                 memberIDs.insert(album.id)
-                vm.extraAlbumIDs.insert(album.id)
+                vm.applyExtraAlbumAdded(albumID: album.id, asset: asset)
             }
-            vm.recomputeMemberships()
-            vm.noteAlbumContentChanged()
             Haptics.tap()
         } catch {
             Haptics.warning()

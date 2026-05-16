@@ -19,6 +19,19 @@ struct AlbumInfo: Identifiable, Hashable, Sendable {
         self.title = collection.localizedTitle ?? "Untitled Album"
         self.assetCount = PHAsset.fetchAssets(in: collection, options: nil).count
     }
+
+    init(id: String, title: String, assetCount: Int) {
+        self.id = id
+        self.title = title
+        self.assetCount = assetCount
+    }
+
+    /// Returns a copy with `assetCount` adjusted by `delta` (clamped at 0).
+    /// Used to update cached metadata after a local add/remove without
+    /// refetching the album.
+    func adjustingCount(by delta: Int) -> AlbumInfo {
+        AlbumInfo(id: id, title: title, assetCount: max(0, assetCount + delta))
+    }
 }
 
 enum AlbumServiceError: LocalizedError {
@@ -38,7 +51,11 @@ enum AlbumService {
     // MARK: - performChanges bridge
 
     /// async/throws bridge over `PHPhotoLibrary.performChanges(_:completionHandler:)`.
+    /// Notifies `PhotoLibrary` that a self-initiated write is in flight so the
+    /// resulting `photoLibraryDidChange` callback can be ignored — listeners
+    /// that triggered the write already know what changed and update locally.
     private static func performChanges(_ block: @Sendable @escaping () -> Void) async throws {
+        await PhotoLibrary.shared.noteSelfWriteBegin()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             PHPhotoLibrary.shared().performChanges(block) { success, error in
                 if success {
@@ -98,9 +115,17 @@ enum AlbumService {
         return result.count > 0
     }
 
-    /// Adds an asset to an album. No-op if already a member.
-    static func add(_ asset: PHAsset, to collection: PHAssetCollection) async throws {
-        if isAsset(asset, memberOf: collection) { return }
+    /// Adds an asset to an album. No-op if already a member. Pass
+    /// `assumeNotMember: true` to skip the membership pre-check when the
+    /// caller already knows the asset is missing (e.g. from a cached
+    /// evaluator state) — this avoids a redundant PhotoKit fetch in the hot
+    /// sort path.
+    static func add(
+        _ asset: PHAsset,
+        to collection: PHAssetCollection,
+        assumeNotMember: Bool = false
+    ) async throws {
+        if !assumeNotMember, isAsset(asset, memberOf: collection) { return }
         try await performChanges {
             guard let req = PHAssetCollectionChangeRequest(for: collection) else {
                 return
@@ -109,9 +134,15 @@ enum AlbumService {
         }
     }
 
-    /// Removes an asset from an album. No-op if not a member.
-    static func remove(_ asset: PHAsset, from collection: PHAssetCollection) async throws {
-        guard isAsset(asset, memberOf: collection) else { return }
+    /// Removes an asset from an album. No-op if not a member. Pass
+    /// `assumeMember: true` to skip the membership pre-check when the caller
+    /// already knows the asset is a member.
+    static func remove(
+        _ asset: PHAsset,
+        from collection: PHAssetCollection,
+        assumeMember: Bool = false
+    ) async throws {
+        if !assumeMember, !isAsset(asset, memberOf: collection) { return }
         try await performChanges {
             guard let req = PHAssetCollectionChangeRequest(for: collection) else {
                 return
