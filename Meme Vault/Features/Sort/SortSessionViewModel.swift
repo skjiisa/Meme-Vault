@@ -49,10 +49,6 @@ final class SortSessionViewModel {
     /// the grid for the active asset.
     private(set) var extraAlbumInfos: [AlbumInfo] = []
 
-    /// True iff there is at least one user album not already in the context.
-    /// Cached so we don't fetch the full album list on every body render.
-    private(set) var hasNonContextAlbums: Bool = false
-
     /// Per-album refresh versions. The album grid cell observes the version
     /// for its own album only — so a tap on one album doesn't force every
     /// other cell to reload its thumbnails.
@@ -60,11 +56,17 @@ final class SortSessionViewModel {
 
     enum SortAction {
         case sorted(localID: String, albumID: String)
+        case sortedMulti(localID: String, adds: [String], removes: [String])
         case skipped(localID: String)
         case queuedDelete(localID: String)
     }
 
     var canUndo: Bool { lastAction != nil }
+
+    /// Albums pending addition in multi-select mode (committed on deactivate).
+    private(set) var multiSelectAdds: Set<String> = []
+    /// Albums pending removal in multi-select mode (committed on deactivate).
+    private(set) var multiSelectRemoves: Set<String> = []
 
     // MARK: - Dependencies
 
@@ -141,7 +143,6 @@ final class SortSessionViewModel {
         // than on every body recomputation so per-tap renders stay cheap.
         refreshAlbumInfos()
         refreshExtraAlbumInfos()
-        refreshHasNonContextAlbums()
 
         self.isLoading = false
         refreshCurrent()
@@ -171,11 +172,6 @@ final class SortSessionViewModel {
         extraAlbumInfos = collections.map { AlbumInfo(collection: $0) }
     }
 
-    private func refreshHasNonContextAlbums() {
-        let contextIDs = Set(context.albumLocalIDs)
-        hasNonContextAlbums = AlbumService.listUserAlbums().contains { !contextIDs.contains($0.id) }
-    }
-
     // MARK: - Current asset
 
     private func refreshCurrent() {
@@ -184,6 +180,8 @@ final class SortSessionViewModel {
             memberships = []
             extraAlbumIDs = []
             extraAlbumInfos = []
+            multiSelectAdds = []
+            multiSelectRemoves = []
             return
         }
         let id = queue[index]
@@ -191,6 +189,8 @@ final class SortSessionViewModel {
         if newAsset?.localIdentifier != currentAsset?.localIdentifier {
             extraAlbumIDs = []
             extraAlbumInfos = []
+            multiSelectAdds = []
+            multiSelectRemoves = []
         }
         currentAsset = newAsset
         recomputeMemberships()
@@ -199,12 +199,19 @@ final class SortSessionViewModel {
     func recomputeMemberships() {
         guard let asset = currentAsset else { memberships = []; return }
         var result = evaluator.albumMemberships(for: asset, in: context)
-        // Use the evaluator's cache for extras too — it's lazily populated
-        // and patched on every add/remove, so this avoids per-tap PhotoKit
-        // fetches when there are extras pinned to the current asset.
         for albumID in extraAlbumIDs {
             let isMember = evaluator.members(of: albumID).contains(asset.localIdentifier)
             result.append(AlbumMembership(id: albumID, isMember: isMember))
+        }
+        if isMultiSelectActive {
+            result = result.map { m in
+                if multiSelectAdds.contains(m.id) {
+                    return AlbumMembership(id: m.id, isMember: true)
+                } else if multiSelectRemoves.contains(m.id) {
+                    return AlbumMembership(id: m.id, isMember: false)
+                }
+                return m
+            }
         }
         memberships = result
     }
@@ -241,11 +248,14 @@ final class SortSessionViewModel {
 
     /// Toggle the current asset's membership in the given album.
     func toggleAlbum(_ albumLocalID: String) async {
-        guard let asset = currentAsset,
-              let collection = AlbumService.collection(for: albumLocalID) else { return }
-        // Use the already-computed membership state instead of issuing another
-        // PhotoKit fetch. `memberships` is populated from the evaluator cache,
-        // which is patched in-place on every add/remove.
+        guard let asset = currentAsset else { return }
+
+        if isMultiSelectActive {
+            toggleAlbumPending(albumLocalID, asset: asset)
+            return
+        }
+
+        guard let collection = AlbumService.collection(for: albumLocalID) else { return }
         let isMember = memberships.first { $0.id == albumLocalID }?.isMember
             ?? evaluator.members(of: albumLocalID).contains(asset.localIdentifier)
         let wasSatisfied = isSatisfied
@@ -260,7 +270,7 @@ final class SortSessionViewModel {
                 try await AlbumService.add(asset, to: collection, assumeNotMember: true)
                 evaluator.noteAdded(asset: asset.localIdentifier, to: albumLocalID)
                 applyLocalMembershipChange(albumID: albumLocalID, delta: +1)
-                if !isMultiSelectActive && !wasSatisfied {
+                if !wasSatisfied {
                     let newMemberships = evaluator.albumMemberships(for: asset, in: context)
                     if newMemberships.contains(where: \.isMember) {
                         lastAction = .sorted(localID: asset.localIdentifier, albumID: albumLocalID)
@@ -276,6 +286,26 @@ final class SortSessionViewModel {
             Haptics.warning()
             print("toggleAlbum failed: \(error)")
         }
+    }
+
+    /// In multi-select mode, toggle pending state without writing to PhotoKit.
+    private func toggleAlbumPending(_ albumLocalID: String, asset: PHAsset) {
+        let actuallyMember = evaluator.members(of: albumLocalID).contains(asset.localIdentifier)
+        if actuallyMember {
+            if multiSelectRemoves.contains(albumLocalID) {
+                multiSelectRemoves.remove(albumLocalID)
+            } else {
+                multiSelectRemoves.insert(albumLocalID)
+            }
+        } else {
+            if multiSelectAdds.contains(albumLocalID) {
+                multiSelectAdds.remove(albumLocalID)
+            } else {
+                multiSelectAdds.insert(albumLocalID)
+            }
+        }
+        recomputeMemberships()
+        Haptics.tap()
     }
 
     /// Patch cached album metadata after a successful add/remove. Bumps the
@@ -294,50 +324,87 @@ final class SortSessionViewModel {
         }
     }
 
-    /// Called by the "Other Albums" sheet after it added the current asset to
-    /// a non-context album. Patches the evaluator cache, updates cached lists,
-    /// and bumps the affected cell's refresh version.
-    func applyExtraAlbumAdded(albumID: String, asset: PHAsset) {
-        evaluator.noteAdded(asset: asset.localIdentifier, to: albumID)
-        extraAlbumIDs.insert(albumID)
-        if let i = extraAlbumInfos.firstIndex(where: { $0.id == albumID }) {
-            extraAlbumInfos[i] = extraAlbumInfos[i].adjustingCount(by: +1)
-        } else if let collection = AlbumService.collection(for: albumID) {
-            extraAlbumInfos.append(AlbumInfo(collection: collection))
+    func activateMultiSelect() {
+        isMultiSelectActive = true
+        let contextIDs = Set(context.albumLocalIDs)
+        let allAlbums = AlbumService.listUserAlbums()
+        let nonContext = allAlbums.filter { !contextIDs.contains($0.id) }
+        for album in nonContext {
+            extraAlbumIDs.insert(album.id)
         }
-        if let i = albumInfos.firstIndex(where: { $0.id == albumID }) {
-            albumInfos[i] = albumInfos[i].adjustingCount(by: +1)
-        }
-        albumRefreshVersions[albumID, default: 0] &+= 1
-        recomputeMemberships()
-    }
-
-    /// Mirror of `applyExtraAlbumAdded` for removals.
-    func applyExtraAlbumRemoved(albumID: String, asset: PHAsset) {
-        evaluator.noteRemoved(asset: asset.localIdentifier, from: albumID)
-        extraAlbumIDs.remove(albumID)
-        extraAlbumInfos.removeAll { $0.id == albumID }
-        if let i = albumInfos.firstIndex(where: { $0.id == albumID }) {
-            albumInfos[i] = albumInfos[i].adjustingCount(by: -1)
-        }
-        albumRefreshVersions[albumID, default: 0] &+= 1
+        extraAlbumInfos = nonContext
         recomputeMemberships()
     }
 
     func deactivateMultiSelect() async {
-        if isSatisfied && !isSatisfiedByContextAlbum {
+        guard let asset = currentAsset else {
+            multiSelectAdds = []
+            multiSelectRemoves = []
+            isMultiSelectActive = false
+            extraAlbumIDs = []
+            extraAlbumInfos = []
+            return
+        }
+
+        let adds = multiSelectAdds
+        let removes = multiSelectRemoves
+        let hasChanges = !adds.isEmpty || !removes.isEmpty
+
+        if hasChanges && isSatisfied && !isSatisfiedByContextAlbum {
             showExtraOnlyAlert = true
             return
         }
+
+        // Commit all pending changes to PhotoKit.
+        for albumID in adds {
+            guard let collection = AlbumService.collection(for: albumID) else { continue }
+            do {
+                try await AlbumService.add(asset, to: collection, assumeNotMember: true)
+                evaluator.noteAdded(asset: asset.localIdentifier, to: albumID)
+                applyLocalMembershipChange(albumID: albumID, delta: +1)
+            } catch {}
+        }
+        for albumID in removes {
+            guard let collection = AlbumService.collection(for: albumID) else { continue }
+            do {
+                try await AlbumService.remove(asset, from: collection, assumeMember: true)
+                evaluator.noteRemoved(asset: asset.localIdentifier, from: albumID)
+                applyLocalMembershipChange(albumID: albumID, delta: -1)
+            } catch {}
+        }
+
+        multiSelectAdds = []
+        multiSelectRemoves = []
         isMultiSelectActive = false
-        if isSatisfied {
+
+        // Keep only extras the asset is actually a member of after commit.
+        let assetID = asset.localIdentifier
+        let contextIDs = Set(context.albumLocalIDs)
+        extraAlbumIDs = extraAlbumIDs.filter { albumID in
+            !contextIDs.contains(albumID) &&
+            evaluator.members(of: albumID).contains(assetID)
+        }
+        refreshExtraAlbumInfos()
+        recomputeMemberships()
+
+        if hasChanges && isSatisfied {
+            lastAction = .sortedMulti(
+                localID: asset.localIdentifier,
+                adds: Array(adds),
+                removes: Array(removes)
+            )
+            Haptics.tap()
             await advance(removingCurrent: true)
         }
     }
 
     func skipFromExtraOnlyAlert() async {
         showExtraOnlyAlert = false
+        multiSelectAdds = []
+        multiSelectRemoves = []
         isMultiSelectActive = false
+        extraAlbumIDs = []
+        extraAlbumInfos = []
         await skip()
     }
 
@@ -352,16 +419,9 @@ final class SortSessionViewModel {
     func advance(removingCurrent removeCurrent: Bool) async {
         if removeCurrent && index < queue.count {
             queue.remove(at: index)
-            // index now points at the next asset (if any) — no increment needed.
         } else {
             index += 1
         }
-        refreshCurrent()
-    }
-
-    func back() async {
-        guard index > 0 else { return }
-        index -= 1
         refreshCurrent()
     }
 
@@ -381,12 +441,10 @@ final class SortSessionViewModel {
 
     func undoSkip() async {
         guard case .skipped(let id) = lastAction else { return }
-        // Find the matching PhotoSkip and delete it.
         if let row = context.skips.first(where: { $0.assetLocalID == id }) {
             modelContext.delete(row)
             try? modelContext.save()
         }
-        // Put it back in the queue at the current index.
         queue.insert(id, at: index)
         lastAction = nil
         refreshCurrent()
@@ -430,18 +488,43 @@ final class SortSessionViewModel {
             try await AlbumService.remove(asset, from: collection, assumeMember: true)
             evaluator.noteRemoved(asset: id, from: albumID)
             applyLocalMembershipChange(albumID: albumID, delta: -1)
-        } catch {
-            // Best-effort; still restore to queue so the user can re-sort.
+        } catch {}
+        queue.insert(id, at: index)
+        lastAction = nil
+        refreshCurrent()
+    }
+
+    func undoSortMulti() async {
+        guard case .sortedMulti(let id, let adds, let removes) = lastAction else { return }
+        guard let asset = AlbumService.asset(for: id) else {
+            lastAction = nil
+            return
+        }
+        for albumID in adds {
+            guard let collection = AlbumService.collection(for: albumID) else { continue }
+            do {
+                try await AlbumService.remove(asset, from: collection, assumeMember: true)
+                evaluator.noteRemoved(asset: id, from: albumID)
+                applyLocalMembershipChange(albumID: albumID, delta: -1)
+            } catch {}
+        }
+        for albumID in removes {
+            guard let collection = AlbumService.collection(for: albumID) else { continue }
+            do {
+                try await AlbumService.add(asset, to: collection, assumeNotMember: true)
+                evaluator.noteAdded(asset: id, to: albumID)
+                applyLocalMembershipChange(albumID: albumID, delta: +1)
+            } catch {}
         }
         queue.insert(id, at: index)
         lastAction = nil
         refreshCurrent()
     }
 
-    /// Unified undo — dispatches to the appropriate handler based on `lastAction`.
     func undo() async {
         switch lastAction {
         case .sorted: await undoSort()
+        case .sortedMulti: await undoSortMulti()
         case .skipped: await undoSkip()
         case .queuedDelete: await undoQueueDelete()
         case nil: break

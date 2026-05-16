@@ -19,7 +19,6 @@ struct SortSessionView: View {
     @State private var vm: SortSessionViewModel?
     @State private var showUndoToast = false
     @State private var undoTimer: Task<Void, Never>?
-    @State private var showExtraAlbumPicker = false
     @State private var showingContextEditor = false
     @State private var columnCount = 3
     @State private var hasAppeared = false
@@ -131,9 +130,8 @@ struct SortSessionView: View {
             )
             .frame(height: 300)
 
-            // Upcoming items preview
-            let upcomingIDs = Array(vm.queue.dropFirst(vm.index + 1).prefix(20))
-            UpcomingItemsView(assetIDs: upcomingIDs) { id in
+            // Queue strip
+            QueuePreviewStrip(assetIDs: vm.queue, currentID: vm.currentAssetID) { id in
                 vm.showAsset(id: id)
             }
 
@@ -148,15 +146,6 @@ struct SortSessionView: View {
             if showUndoToast, let action = vm.lastAction {
                 undoToast(action: action, vm: vm)
                     .padding(.bottom, 16)
-            }
-        }
-        .sheet(isPresented: $showExtraAlbumPicker) {
-            if let asset = vm.currentAsset {
-                ExtraAlbumSheet(
-                    asset: asset,
-                    contextAlbumIDs: Set(context.albumLocalIDs),
-                    vm: vm
-                )
             }
         }
         .sheet(item: $viewingAlbum) { album in
@@ -230,6 +219,7 @@ struct SortSessionView: View {
                             isMember: isMember,
                             refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
                         )
+                        .opacity(isMember ? 1 : 0.6)
                     }
                     .buttonStyle(.plain)
                     .contextMenu {
@@ -237,29 +227,6 @@ struct SortSessionView: View {
                             viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
                         }
                     }
-                    .transition(.opacity.combined(with: .offset(y: 20)))
-                }
-                if vm.isMultiSelectActive && vm.hasNonContextAlbums {
-                    Button {
-                        showExtraAlbumPicker = true
-                    } label: {
-                        VStack(alignment: .leading, spacing: 6) {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 12)
-                                    .fill(Color(.tertiarySystemFill))
-                                Image(systemName: "plus.circle")
-                                    .font(.title2)
-                                    .foregroundStyle(Color.accentColor)
-                            }
-                            .aspectRatio(1, contentMode: .fit)
-                            Text("Other Albums")
-                                .font(.subheadline.weight(.medium))
-                                .lineLimit(1)
-                            Text(" ")
-                                .font(.caption2)
-                        }
-                    }
-                    .buttonStyle(.plain)
                     .transition(.opacity.combined(with: .offset(y: 20)))
                 }
             }
@@ -321,9 +288,12 @@ struct SortSessionView: View {
 
             Button {
                 if vm.isMultiSelectActive {
-                    Task { await vm.deactivateMultiSelect() }
+                    Task {
+                        await vm.deactivateMultiSelect()
+                        if case .sortedMulti = vm.lastAction { showToast() }
+                    }
                 } else {
-                    vm.isMultiSelectActive = true
+                    vm.activateMultiSelect()
                 }
             } label: {
                 Image(systemName: vm.isMultiSelectActive ? "rectangle.stack.fill" : "rectangle.stack")
@@ -351,6 +321,7 @@ struct SortSessionView: View {
         let label: String = {
             switch action {
             case .sorted: return "Sorted"
+            case .sortedMulti: return "Sorted"
             case .skipped: return "Skipped"
             case .queuedDelete: return "Queued for deletion"
             }
@@ -374,72 +345,3 @@ struct SortSessionView: View {
     }
 }
 
-// MARK: - Extra album sheet
-
-private struct ExtraAlbumSheet: View {
-    let asset: PHAsset
-    let contextAlbumIDs: Set<String>
-    let vm: SortSessionViewModel
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var albums: [AlbumInfo] = []
-    @State private var memberIDs: Set<String> = []
-
-    var body: some View {
-        NavigationStack {
-            List(albums) { album in
-                Button {
-                    Task { await toggle(album) }
-                } label: {
-                    HStack {
-                        Image(systemName: memberIDs.contains(album.id)
-                              ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(memberIDs.contains(album.id)
-                                             ? Color.accentColor : Color.secondary)
-                        Text(album.title)
-                            .foregroundStyle(.primary)
-                        Spacer()
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-            .navigationTitle("Other Albums")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
-                }
-            }
-            .onAppear { load() }
-        }
-    }
-
-    private func load() {
-        albums = AlbumService.listUserAlbums().filter { !contextAlbumIDs.contains($0.id) }
-        for album in albums {
-            if let collection = AlbumService.collection(for: album.id),
-               AlbumService.isAsset(asset, memberOf: collection) {
-                memberIDs.insert(album.id)
-            }
-        }
-    }
-
-    private func toggle(_ album: AlbumInfo) async {
-        guard let collection = AlbumService.collection(for: album.id) else { return }
-        do {
-            if memberIDs.contains(album.id) {
-                try await AlbumService.remove(asset, from: collection, assumeMember: true)
-                memberIDs.remove(album.id)
-                vm.applyExtraAlbumRemoved(albumID: album.id, asset: asset)
-            } else {
-                try await AlbumService.add(asset, to: collection, assumeNotMember: true)
-                memberIDs.insert(album.id)
-                vm.applyExtraAlbumAdded(albumID: album.id, asset: asset)
-            }
-            Haptics.tap()
-        } catch {
-            Haptics.warning()
-        }
-    }
-}
