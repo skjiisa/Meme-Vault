@@ -31,24 +31,20 @@ struct AlbumGridCell: View {
                         .foregroundStyle(.tertiary)
                         .transition(.opacity)
                 } else {
-                    Grid(horizontalSpacing: 2, verticalSpacing: 2) {
-                        ForEach(0..<2, id: \.self) { row in
-                            GridRow {
-                                ForEach(0..<2, id: \.self) { col in
-                                    let index = row * 2 + col
-                                    if index < thumbnails.count {
-                                        Image(uiImage: thumbnails[index].image)
-                                            .resizable()
-                                            .scaledToFill()
-                                            .frame(minWidth: 0, maxWidth: .infinity,
-                                                   minHeight: 0, maxHeight: .infinity)
-                                            .clipped()
-                                            .id(thumbnails[index].id)
-                                            .transition(.scale(scale: 0.8).combined(with: .opacity))
-                                    } else {
-                                        Color(.tertiarySystemFill)
-                                    }
-                                }
+                    GeometryReader { proxy in
+                        let cellSize = max(0, (proxy.size.width - 2) / 2)
+                        LazyVGrid(columns: Self.gridColumns, spacing: 2) {
+                            ForEach(Array(thumbnails.prefix(4)), id: \.id) { thumb in
+                                Image(uiImage: thumb.image)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: cellSize, height: cellSize)
+                                    .clipped()
+                                    .transition(.opacity)
+                            }
+                            ForEach(min(thumbnails.count, 4)..<4, id: \.self) { _ in
+                                Color(.tertiarySystemFill)
+                                    .frame(width: cellSize, height: cellSize)
                             }
                         }
                     }
