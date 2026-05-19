@@ -13,7 +13,7 @@ import Photos
 
 struct RootView: View {
     @Environment(\.modelContext) private var modelContext
-    @EnvironmentObject private var library: PhotoLibrary
+    @Environment(PhotoLibrary.self) private var library
 
     @Query(sort: \OrgContext.createdAt, order: .reverse)
     private var contexts: [OrgContext]
@@ -218,7 +218,7 @@ private struct ToolbarBadges: View {
 // MARK: - Authorization gate (reusable)
 
 private struct AuthorizationGateView: View {
-    @EnvironmentObject private var library: PhotoLibrary
+    @Environment(PhotoLibrary.self) private var library
 
     var body: some View {
         ContentUnavailableView {

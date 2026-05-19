@@ -10,12 +10,10 @@ import SwiftData
 
 @main
 struct Meme_VaultApp: App {
-    @StateObject private var library = PhotoLibrary.shared
-
     var body: some Scene {
         WindowGroup {
             RootView()
-                .environmentObject(library)
+                .environment(PhotoLibrary.shared)
         }
         .modelContainer(for: [
             OrgContext.self,

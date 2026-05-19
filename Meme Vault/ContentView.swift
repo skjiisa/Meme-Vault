@@ -10,6 +10,6 @@ import SwiftData
 
 #Preview {
     RootView()
-        .environmentObject(PhotoLibrary.shared)
+        .environment(PhotoLibrary.shared)
         .modelContainer(for: AppSchema.models, inMemory: true)
 }

@@ -14,7 +14,7 @@ struct SortSessionView: View {
     let context: OrgContext
 
     @Environment(\.modelContext) private var modelContext
-    @EnvironmentObject private var library: PhotoLibrary
+    @Environment(PhotoLibrary.self) private var library
 
     @State private var vm: SortSessionViewModel?
     @State private var showUndoToast = false

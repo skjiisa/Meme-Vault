@@ -16,7 +16,7 @@ struct ContextListView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var library: PhotoLibrary
+    @Environment(PhotoLibrary.self) private var library
 
     @Query(sort: \OrgContext.createdAt, order: .reverse)
     private var contexts: [OrgContext]
