@@ -71,9 +71,16 @@ final class ContextEvaluator {
     /// True if the asset satisfies the context (is in at least one destination
     /// album). A context with no albums is trivially satisfied.
     func isSatisfied(_ asset: PHAsset, in context: OrgContext) -> Bool {
+        isSatisfied(assetID: asset.localIdentifier, in: context)
+    }
+
+    /// String-based overload — avoids the need to resolve a full PHAsset when
+    /// only the local identifier is available (e.g. during lightweight queue
+    /// rebuilds that skip batch asset resolution).
+    func isSatisfied(assetID: String, in context: OrgContext) -> Bool {
         if context.albumLocalIDs.isEmpty { return true }
         return context.albumLocalIDs.contains { albumID in
-            members(of: albumID).contains(asset.localIdentifier)
+            members(of: albumID).contains(assetID)
         }
     }
 }

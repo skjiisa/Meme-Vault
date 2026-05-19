@@ -7,27 +7,29 @@
 
 import Foundation
 import Photos
-import Combine
 
 /// Singleton-style observable wrapper around `PHPhotoLibrary`. Owns the
 /// authorization state and a `PHPhotoLibraryChangeObserver` that publishes
-/// changes via Combine so views can refresh.
+/// changes so views can refresh. Uses `@Observable` for per-property tracking —
+/// views reading only `changeTick` won't re-evaluate when `authorization` or
+/// `lastChange` changes, and vice versa.
 @MainActor
-final class PhotoLibrary: NSObject, ObservableObject {
+@Observable
+final class PhotoLibrary: NSObject {
     static let shared = PhotoLibrary()
 
-    @Published private(set) var authorization: PHAuthorizationStatus
+    private(set) var authorization: PHAuthorizationStatus
 
     /// Bumped every time PhotoKit reports an *external* change. Views observing
     /// this can re-evaluate their state. Self-initiated writes (those marked
     /// via `noteSelfWriteBegin()`) are consumed by the change observer instead
     /// of bumping this tick — the caller already knows what changed and can
     /// update incrementally without a full reload.
-    @Published private(set) var changeTick: Int = 0
+    private(set) var changeTick: Int = 0
 
     /// Latest change passed to the observer, for callers that need fine-grained
     /// detail.
-    @Published private(set) var lastChange: PHChange?
+    private(set) var lastChange: PHChange?
 
     private var didRegisterObserver = false
 

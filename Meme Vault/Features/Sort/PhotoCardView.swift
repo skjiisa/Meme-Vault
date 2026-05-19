@@ -51,13 +51,13 @@ struct PhotoCardView: View {
 
     private func updatePrefetchWindow(targetSize: CGSize) {
         guard let id = currentID, let i = assetIDs.firstIndex(of: id) else {
-            ImageLoader.shared.setCacheWindow([], targetSize: targetSize)
+            ImageLoader.shared.setCacheWindow(assetIDs: [], targetSize: targetSize)
             return
         }
         let lower = max(0, i - prefetchBehind)
         let upper = min(assetIDs.count - 1, i + prefetchAhead)
         let windowIDs = Array(assetIDs[lower...upper])
-        ImageLoader.shared.setCacheWindow(AlbumService.assets(for: windowIDs), targetSize: targetSize)
+        ImageLoader.shared.setCacheWindow(assetIDs: windowIDs, targetSize: targetSize)
     }
 }
 

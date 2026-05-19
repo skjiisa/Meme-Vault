@@ -20,7 +20,7 @@ struct AlbumPicker: View {
     let mode: Mode
 
     @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var library: PhotoLibrary
+    @Environment(PhotoLibrary.self) private var library
 
     @State private var albums: [AlbumInfo] = []
     @State private var search = ""

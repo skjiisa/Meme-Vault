@@ -14,7 +14,7 @@ struct SortSessionView: View {
     let context: OrgContext
 
     @Environment(\.modelContext) private var modelContext
-    @EnvironmentObject private var library: PhotoLibrary
+    @Environment(PhotoLibrary.self) private var library
 
     @State private var vm: SortSessionViewModel?
     @State private var showUndoToast = false
@@ -60,13 +60,13 @@ struct SortSessionView: View {
         .task(id: library.changeTick) {
             // External Photos changes — only act after first load.
             guard let vm, library.changeTick > 0 else { return }
-            await vm.handleLibraryChange()
+            vm.handleLibraryChange()
         }
         .onAppear {
             let stored = UserDefaults.standard.object(forKey: columnCountKey) as? Int
             columnCount = stored ?? 3
             if hasAppeared {
-                Task { await vm?.rebuildQueue() }
+                Task { await vm?.refreshAfterReappear() }
             }
             hasAppeared = true
         }
@@ -179,10 +179,11 @@ struct SortSessionView: View {
     private func albumList(vm: SortSessionViewModel) -> some View {
         let infos = vm.albumInfos
         let extras = vm.extraAlbumInfos
+        let memberIDs = Set(vm.memberships.filter(\.isMember).map(\.id))
         ScrollView {
             LazyVGrid(columns: albumColumns, spacing: 8) {
                 ForEach(infos, id: \.id) { info in
-                    let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
+                    let isMember = memberIDs.contains(info.id)
                     Button {
                         Task {
                             await vm.toggleAlbum(info.id)
@@ -205,7 +206,7 @@ struct SortSessionView: View {
                     }
                 }
                 ForEach(extras, id: \.id) { info in
-                    let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
+                    let isMember = memberIDs.contains(info.id)
                     Button {
                         Task {
                             await vm.toggleAlbum(info.id)
