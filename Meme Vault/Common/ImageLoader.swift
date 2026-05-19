@@ -31,6 +31,17 @@ final class ImageLoader {
         return o
     }()
 
+    /// Options for fast thumbnail requests — accepts the first result PhotoKit
+    /// returns (including degraded) so grid cells and strips populate instantly.
+    private let thumbnailOptions: PHImageRequestOptions = {
+        let o = PHImageRequestOptions()
+        o.deliveryMode = .opportunistic
+        o.resizeMode = .fast
+        o.isNetworkAccessAllowed = true
+        o.isSynchronous = false
+        return o
+    }()
+
     /// Assets currently registered with the caching manager, keyed by localID.
     private var cachedWindow: [String: PHAsset] = [:]
     private var cacheTargetSize: CGSize = .zero
@@ -58,6 +69,32 @@ final class ImageLoader {
             ) { image, info in
                 let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
                 guard !isDegraded else { return }
+                guard !box.resumed else { return }
+                box.resumed = true
+                cont.resume(returning: image)
+            }
+        }
+    }
+
+    // MARK: - Thumbnail request
+
+    /// Fast thumbnail for grid cells, queue strips, and other small previews.
+    /// Accepts the first image PhotoKit delivers (including degraded) so cells
+    /// populate immediately rather than waiting for a full-quality decode.
+    func loadThumbnail(
+        for asset: PHAsset,
+        targetSize: CGSize
+    ) async -> UIImage? {
+        await withCheckedContinuation { (cont: CheckedContinuation<UIImage?, Never>) in
+            final class Box: @unchecked Sendable { var resumed = false }
+            let box = Box()
+
+            manager.requestImage(
+                for: asset,
+                targetSize: targetSize,
+                contentMode: .aspectFill,
+                options: thumbnailOptions
+            ) { image, _ in
                 guard !box.resumed else { return }
                 box.resumed = true
                 cont.resume(returning: image)

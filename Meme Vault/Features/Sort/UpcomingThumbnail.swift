@@ -19,7 +19,7 @@ struct UpcomingThumbnail: View {
             .clipShape(.rect(cornerRadius: 6))
             .task(id: assetID) {
                 guard let asset = AlbumService.asset(for: assetID) else { return }
-                thumbnail = await ImageLoader.shared.loadDisplayImage(
+                thumbnail = await ImageLoader.shared.loadThumbnail(
                     for: asset,
                     targetSize: CGSize(width: 88, height: 88)
                 )

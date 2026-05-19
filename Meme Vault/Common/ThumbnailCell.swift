@@ -35,7 +35,7 @@ struct ThumbnailCell: View {
             }
             .task(id: assetLocalID) {
                 guard let asset = AlbumService.asset(for: assetLocalID) else { return }
-                thumbnail = await ImageLoader.shared.loadDisplayImage(
+                thumbnail = await ImageLoader.shared.loadThumbnail(
                     for: asset,
                     targetSize: CGSize(width: 200, height: 200)
                 )

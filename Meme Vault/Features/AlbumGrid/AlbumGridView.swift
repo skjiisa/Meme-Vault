@@ -107,7 +107,7 @@ struct AlbumGridCell: View {
         var items: [AlbumThumbnail] = []
         for i in 0..<result.count {
             let asset = result.object(at: i)
-            if let image = await ImageLoader.shared.loadDisplayImage(
+            if let image = await ImageLoader.shared.loadThumbnail(
                 for: asset,
                 targetSize: CGSize(width: 200, height: 200)
             ) {
