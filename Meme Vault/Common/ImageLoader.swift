@@ -104,15 +104,13 @@ final class ImageLoader {
 
     // MARK: - Prefetch window
 
-    /// Declare the exact set of assets that should be kept warm right now.
-    /// Diffs against the previous window: newcomers begin caching, assets that
-    /// fell out stop caching. Keeps memory bounded regardless of queue size.
-    /// Pass `[]` to clear the window without tearing down the manager.
-    func setCacheWindow(_ assets: [PHAsset], targetSize: CGSize) {
+    /// Declare the exact set of asset IDs that should be kept warm right now.
+    /// Reuses already-cached `PHAsset` objects and only fetches newcomers from
+    /// PhotoKit, so a typical 1-page swipe resolves just 1 asset instead of the
+    /// entire window.
+    func setCacheWindow(assetIDs: [String], targetSize: CGSize) {
         guard targetSize.width > 0, targetSize.height > 0 else { return }
 
-        // A different page size means the cached renditions are the wrong
-        // resolution — drop them all and rebuild at the new size.
         if cacheTargetSize != targetSize, !cachedWindow.isEmpty {
             manager.stopCachingImages(
                 for: Array(cachedWindow.values),
@@ -124,7 +122,7 @@ final class ImageLoader {
         }
         cacheTargetSize = targetSize
 
-        let wantedIDs = Set(assets.map(\.localIdentifier))
+        let wantedIDs = Set(assetIDs)
 
         let dropped = cachedWindow.compactMap { wantedIDs.contains($0.key) ? nil : $0.value }
         if !dropped.isEmpty {
@@ -132,10 +130,11 @@ final class ImageLoader {
             for asset in dropped { cachedWindow[asset.localIdentifier] = nil }
         }
 
-        let added = assets.filter { cachedWindow[$0.localIdentifier] == nil }
-        if !added.isEmpty {
-            manager.startCachingImages(for: added, targetSize: targetSize, contentMode: .aspectFit, options: options)
-            for asset in added { cachedWindow[asset.localIdentifier] = asset }
+        let newIDs = assetIDs.filter { cachedWindow[$0] == nil }
+        if !newIDs.isEmpty {
+            let fetched = AlbumService.assets(for: newIDs)
+            manager.startCachingImages(for: fetched, targetSize: targetSize, contentMode: .aspectFit, options: options)
+            for asset in fetched { cachedWindow[asset.localIdentifier] = asset }
         }
     }
 
