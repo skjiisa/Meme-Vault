@@ -12,9 +12,8 @@ import Foundation
 import Photos
 
 /// Snapshot of a fetch result, exposed in a Swift-friendly way.
-struct AssetQueue {
+struct AssetQueue: Sendable {
     let assetLocalIDs: [String]
-    let fetchResult: PHFetchResult<PHAsset>?
 
     var count: Int { assetLocalIDs.count }
     var isEmpty: Bool { assetLocalIDs.isEmpty }
@@ -45,7 +44,7 @@ enum AssetSource {
                 let albumID = context.sourceAlbumLocalID,
                 let collection = AlbumService.collection(for: albumID)
             else {
-                return AssetQueue(assetLocalIDs: [], fetchResult: nil)
+                return AssetQueue(assetLocalIDs: [])
             }
             fetch = PHAsset.fetchAssets(in: collection, options: opts)
         }
@@ -53,6 +52,6 @@ enum AssetSource {
         var ids: [String] = []
         ids.reserveCapacity(fetch.count)
         fetch.enumerateObjects { a, _, _ in ids.append(a.localIdentifier) }
-        return AssetQueue(assetLocalIDs: ids, fetchResult: fetch)
+        return AssetQueue(assetLocalIDs: ids)
     }
 }

@@ -77,10 +77,6 @@ final class SortSessionViewModel {
     private let modelContext: ModelContext
     private let evaluator = ContextEvaluator()
 
-    /// Cached fetch result from the source pool, used with
-    /// `PHChange.changeDetails(for:)` to detect whether a rebuild is needed.
-    private var sourceFetchResult: PHFetchResult<PHAsset>?
-
     init(context: OrgContext, modelContext: ModelContext) {
         self.context = context
         self.modelContext = modelContext
@@ -119,7 +115,7 @@ final class SortSessionViewModel {
         }
 
         let pool = AssetSource.queue(for: context)
-        sourceFetchResult = pool.fetchResult
+
         totalAssetsInPool = pool.count
 
         let skipIDs = Set(context.skips.map(\.assetLocalID))
@@ -563,77 +559,15 @@ final class SortSessionViewModel {
 
     // MARK: - PhotoKit change handling
 
-    /// Called when the photo library reports external changes. Uses
-    /// `PHChange.changeDetails` to skip work when the source pool is unaffected
-    /// (the common case for self-write leaks). When the pool did change, rebuilds
-    /// the queue from the warm evaluator cache — no invalidation, no batch asset
-    /// resolution — so membership checks are O(1) set lookups.
-    func handleLibraryChange(change: PHChange?) async {
-        guard let change, let sourceFetch = sourceFetchResult else {
-            await rebuildQueue()
-            return
-        }
-
-        let sourceDetails = change.changeDetails(for: sourceFetch)
-
-        if sourceDetails == nil {
-            refreshCurrent()
-            return
-        }
-
-        sourceFetchResult = sourceDetails!.fetchResultAfterChanges
-        await rebuildQueueFromCache()
-    }
-
-    /// Rebuilds the queue reusing the warm evaluator cache and the already-
-    /// updated source fetch result. Skips evaluator invalidation, batch PHAsset
-    /// resolution, and per-album count fetches — the expensive parts of a full
-    /// `rebuildQueue()`.
-    private func rebuildQueueFromCache() async {
-        isLoading = true
-
-        if context.isDefault {
-            refreshDefaultAlbumsLight()
-        }
-
-        guard let fetch = sourceFetchResult else {
-            isLoading = false
-            return
-        }
-
-        var allLocalIDs: [String] = []
-        allLocalIDs.reserveCapacity(fetch.count)
-        fetch.enumerateObjects { a, _, _ in allLocalIDs.append(a.localIdentifier) }
-        totalAssetsInPool = allLocalIDs.count
-
-        let skipIDs = Set(context.skips.map(\.assetLocalID))
-        let deleteIDs = Set(context.pendingDeletes.map(\.assetLocalID))
-
-        var remaining: [String] = []
-        remaining.reserveCapacity(allLocalIDs.count)
-
-        let activeID = currentAssetID
-        for id in allLocalIDs {
-            if skipIDs.contains(id) || deleteIDs.contains(id) { continue }
-            if !evaluator.isSatisfied(assetID: id, in: context) {
-                remaining.append(id)
-            } else if isMultiSelectActive && id == activeID {
-                remaining.append(id)
-            }
-        }
-
-        self.queue = remaining
-        if let activeID, let newIndex = remaining.firstIndex(of: activeID) {
-            self.index = newIndex
-        } else {
-            self.index = 0
-        }
-
-        if !extraAlbumIDs.isEmpty {
-            refreshExtraAlbumInfos()
-        }
-
-        self.isLoading = false
+    /// Called when the photo library reports a change via `changeTick`. During
+    /// an active sort session the vast majority of these are self-write leaks
+    /// (the `pendingSelfWrites` counter can't reliably suppress every PhotoKit
+    /// callback). A full queue rebuild here would cost hundreds of milliseconds
+    /// and stutter the UI, so we only refresh the current asset's metadata.
+    /// Actual queue rebuilds are deferred to explicit user actions: first load
+    /// (`start`), view reappear (`refreshAfterReappear`), and context edit
+    /// dismiss (`rebuildQueue`).
+    func handleLibraryChange() {
         refreshCurrent()
     }
 
@@ -659,7 +593,7 @@ final class SortSessionViewModel {
         }
 
         let pool = AssetSource.queue(for: context)
-        sourceFetchResult = pool.fetchResult
+
         totalAssetsInPool = pool.count
 
         let skipIDs = Set(context.skips.map(\.assetLocalID))
