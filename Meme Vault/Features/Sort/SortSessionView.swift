@@ -179,10 +179,11 @@ struct SortSessionView: View {
     private func albumList(vm: SortSessionViewModel) -> some View {
         let infos = vm.albumInfos
         let extras = vm.extraAlbumInfos
+        let memberIDs = Set(vm.memberships.filter(\.isMember).map(\.id))
         ScrollView {
             LazyVGrid(columns: albumColumns, spacing: 8) {
                 ForEach(infos, id: \.id) { info in
-                    let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
+                    let isMember = memberIDs.contains(info.id)
                     Button {
                         Task {
                             await vm.toggleAlbum(info.id)
@@ -205,7 +206,7 @@ struct SortSessionView: View {
                     }
                 }
                 ForEach(extras, id: \.id) { info in
-                    let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
+                    let isMember = memberIDs.contains(info.id)
                     Button {
                         Task {
                             await vm.toggleAlbum(info.id)
