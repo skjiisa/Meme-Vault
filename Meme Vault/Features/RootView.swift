@@ -18,8 +18,6 @@ struct RootView: View {
     @Query(sort: \OrgContext.createdAt, order: .reverse)
     private var contexts: [OrgContext]
 
-    @Query private var pendingDeletes: [PendingDelete]
-
     @State private var showingContextList = false
     @State private var showingDebugConfirm = false
     @State private var debugMessage: String?
@@ -70,31 +68,10 @@ struct RootView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    HStack(spacing: 12) {
-                        Button {
-                            showingContextList = true
-                        } label: {
-                            Image(systemName: "list.bullet")
-                        }
-                        NavigationLink {
-                            PhotoCollectionView(mode: .trash)
-                        } label: {
-                            let count = pendingDeletes.count
-                            Label("Trash\(count > 0 ? " (\(count))" : "")",
-                                  systemImage: "trash")
-                        }
-                        .disabled(pendingDeletes.isEmpty)
-                        if let ctx = displayedContext {
-                            NavigationLink {
-                                PhotoCollectionView(mode: .skipped(ctx))
-                            } label: {
-                                let count = ctx.skips.count
-                                Label("Skipped\(count > 0 ? " (\(count))" : "")",
-                                      systemImage: "checkmark.circle")
-                            }
-                            .disabled(ctx.skips.isEmpty)
-                        }
-                    }
+                    ToolbarBadges(
+                        context: displayedContext,
+                        onShowContextList: { showingContextList = true }
+                    )
                 }
                 #if DEBUG
                 ToolbarItem(placement: .topBarTrailing) {
@@ -125,9 +102,11 @@ struct RootView: View {
                 })
             }
             .alert("Debug: Clear Album Membership", isPresented: $showingDebugConfirm) {
+                #if DEBUG
                 Button("Remove All", role: .destructive) {
                     Task { await debugClearAlbums() }
                 }
+                #endif
                 Button("Cancel", role: .cancel) { }
             } message: {
                 Text("This will remove every photo from every album and clear all skipped photos. Photos will NOT be deleted. This cannot be undone.")
@@ -199,6 +178,41 @@ struct RootView: View {
         debugMessage = nil
     }
     #endif
+}
+
+// MARK: - Toolbar badges (isolated from RootView to avoid @Query churn)
+
+private struct ToolbarBadges: View {
+    let context: OrgContext?
+    let onShowContextList: () -> Void
+
+    @Query private var pendingDeletes: [PendingDelete]
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button { onShowContextList() } label: {
+                Image(systemName: "list.bullet")
+            }
+            NavigationLink {
+                PhotoCollectionView(mode: .trash)
+            } label: {
+                let count = pendingDeletes.count
+                Label("Trash\(count > 0 ? " (\(count))" : "")",
+                      systemImage: "trash")
+            }
+            .disabled(pendingDeletes.isEmpty)
+            if let ctx = context {
+                NavigationLink {
+                    PhotoCollectionView(mode: .skipped(ctx))
+                } label: {
+                    let count = ctx.skips.count
+                    Label("Skipped\(count > 0 ? " (\(count))" : "")",
+                          systemImage: "checkmark.circle")
+                }
+                .disabled(ctx.skips.isEmpty)
+            }
+        }
+    }
 }
 
 // MARK: - Authorization gate (reusable)

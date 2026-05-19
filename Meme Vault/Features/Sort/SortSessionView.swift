@@ -60,13 +60,13 @@ struct SortSessionView: View {
         .task(id: library.changeTick) {
             // External Photos changes — only act after first load.
             guard let vm, library.changeTick > 0 else { return }
-            await vm.handleLibraryChange()
+            await vm.handleLibraryChange(change: library.lastChange)
         }
         .onAppear {
             let stored = UserDefaults.standard.object(forKey: columnCountKey) as? Int
             columnCount = stored ?? 3
             if hasAppeared {
-                Task { await vm?.rebuildQueue() }
+                Task { await vm?.refreshAfterReappear() }
             }
             hasAppeared = true
         }

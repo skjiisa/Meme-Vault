@@ -17,7 +17,8 @@ struct AlbumInfo: Identifiable, Hashable, Sendable {
     init(collection: PHAssetCollection) {
         self.id = collection.localIdentifier
         self.title = collection.localizedTitle ?? "Untitled Album"
-        self.assetCount = PHAsset.fetchAssets(in: collection, options: nil).count
+        let estimate = collection.estimatedAssetCount
+        self.assetCount = estimate != NSNotFound ? estimate : 0
     }
 
     init(id: String, title: String, assetCount: Int) {
@@ -84,6 +85,25 @@ enum AlbumService {
             albums.append(AlbumInfo(collection: collection))
         }
         return albums
+    }
+
+    /// Returns all user-created album local IDs sorted by title — without
+    /// counting assets per album. Much cheaper than `listUserAlbums()` when
+    /// only the identifiers are needed.
+    static func listUserAlbumIDs() -> [String] {
+        let opts = PHFetchOptions()
+        opts.sortDescriptors = [NSSortDescriptor(key: "localizedTitle", ascending: true)]
+        let result = PHAssetCollection.fetchAssetCollections(
+            with: .album,
+            subtype: .albumRegular,
+            options: opts
+        )
+        var ids: [String] = []
+        ids.reserveCapacity(result.count)
+        result.enumerateObjects { collection, _, _ in
+            ids.append(collection.localIdentifier)
+        }
+        return ids
     }
 
     /// Resolves album local identifiers back to `PHAssetCollection`s. Missing
