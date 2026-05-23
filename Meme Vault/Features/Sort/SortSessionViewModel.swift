@@ -37,6 +37,10 @@ final class SortSessionViewModel {
     /// When true, album taps don't auto-advance.
     var isMultiSelectActive: Bool = false
 
+    /// Bulk sort mode: select multiple photos, then tap an album to add them all.
+    private(set) var isBulkMode: Bool = false
+    private(set) var bulkSelectedIDs: Set<String> = []
+
     /// Non-context albums selected via the "Other Albums" sheet for the current photo.
     private(set) var extraAlbumIDs: Set<String> = []
 
@@ -66,6 +70,7 @@ final class SortSessionViewModel {
         case sortedMulti(localID: String, adds: [String], removes: [String])
         case skipped(localID: String)
         case queuedDelete(localID: String)
+        case bulkSorted(addedToAlbum: [String], removedFromQueue: [String], albumID: String)
     }
 
     var canUndo: Bool { lastAction != nil }
@@ -467,6 +472,119 @@ final class SortSessionViewModel {
         showExtraOnlyAlert = false
     }
 
+    // MARK: - Bulk sort mode
+
+    func enterBulkMode() {
+        if isMultiSelectActive {
+            multiSelectAdds = []
+            multiSelectRemoves = []
+            isMultiSelectActive = false
+            extraAlbumIDs = []
+            extraAlbumInfos = []
+        }
+        isBulkMode = true
+        bulkSelectedIDs = []
+    }
+
+    func exitBulkMode() {
+        isBulkMode = false
+        bulkSelectedIDs = []
+        refreshCurrent()
+    }
+
+    func toggleBulkSelection(_ id: String) {
+        if bulkSelectedIDs.contains(id) {
+            bulkSelectedIDs.remove(id)
+        } else {
+            bulkSelectedIDs.insert(id)
+        }
+        Haptics.tap()
+    }
+
+    func selectAllBulk() {
+        bulkSelectedIDs = Set(queue)
+    }
+
+    func clearBulkSelection() {
+        bulkSelectedIDs = []
+    }
+
+    func bulkSortToAlbum(_ albumID: String) async {
+        let selected = bulkSelectedIDs
+        guard !selected.isEmpty else { return }
+        guard let collection = AlbumService.collection(for: albumID) else { return }
+
+        let members = evaluator.members(of: albumID)
+        var addedIDs: [String] = []
+
+        for id in selected {
+            if members.contains(id) { continue }
+            guard let asset = AlbumService.asset(for: id) else { continue }
+            do {
+                try await AlbumService.add(asset, to: collection, assumeNotMember: true)
+                evaluator.noteAdded(asset: id, to: albumID)
+                addedIDs.append(id)
+            } catch {}
+        }
+
+        if !addedIDs.isEmpty {
+            applyLocalMembershipChange(albumID: albumID, delta: addedIDs.count)
+        }
+
+        var removedIDs: [String] = []
+        for id in selected {
+            if evaluator.isSatisfied(assetID: id, in: context) {
+                removedIDs.append(id)
+            }
+        }
+
+        if !removedIDs.isEmpty {
+            let removedSet = Set(removedIDs)
+            queue.removeAll { removedSet.contains($0) }
+            if index >= queue.count {
+                index = max(0, queue.count - 1)
+            }
+        }
+
+        bulkSelectedIDs.subtract(removedIDs)
+
+        lastAction = .bulkSorted(
+            addedToAlbum: addedIDs,
+            removedFromQueue: removedIDs,
+            albumID: albumID
+        )
+        Haptics.success()
+        refreshCurrent()
+    }
+
+    private func undoBulkSort() async {
+        guard case .bulkSorted(let addedIDs, let removedIDs, let albumID) = lastAction else {
+            return
+        }
+        guard let collection = AlbumService.collection(for: albumID) else {
+            lastAction = nil
+            return
+        }
+
+        for id in addedIDs {
+            guard let asset = AlbumService.asset(for: id) else { continue }
+            do {
+                try await AlbumService.remove(asset, from: collection, assumeMember: true)
+                evaluator.noteRemoved(asset: id, from: albumID)
+            } catch {}
+        }
+        if !addedIDs.isEmpty {
+            applyLocalMembershipChange(albumID: albumID, delta: -addedIDs.count)
+        }
+
+        for id in removedIDs.reversed() where !queue.contains(id) {
+            queue.insert(id, at: min(index, queue.count))
+        }
+
+        lastAction = nil
+        refreshCurrent()
+    }
+
     // MARK: - Advance / back
 
     /// Advance to the next asset. Removes the current asset from the queue if
@@ -584,6 +702,7 @@ final class SortSessionViewModel {
         case .sortedMulti: await undoSortMulti()
         case .skipped: await undoSkip()
         case .queuedDelete: await undoQueueDelete()
+        case .bulkSorted: await undoBulkSort()
         case nil: break
         }
     }
