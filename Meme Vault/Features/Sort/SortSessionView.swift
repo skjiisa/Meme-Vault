@@ -15,19 +15,34 @@ struct SortSessionView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(PhotoLibrary.self) private var library
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var vm: SortSessionViewModel?
     @State private var showUndoToast = false
     @State private var undoTimer: Task<Void, Never>?
     @State private var showingContextEditor = false
     @State private var columnCount = 3
+    @State private var photoHeight: CGFloat = 300
+    @State private var dragStartHeight: CGFloat?
+    @State private var wasInNotch = false
     @State private var hasAppeared = false
     @State private var viewingAlbum: AlbumSheetItem?
     @Namespace private var thumbnailNamespace
 
+    private let minPhotoHeight: CGFloat = 120
+    private let maxPhotoHeight: CGFloat = 500
+    private let defaultPhotoHeight: CGFloat = 300
+    private let notchRadius: CGFloat = 30
+    private let notchDamping: CGFloat = 0.25
+
     private var columnCountKey: String {
         "albumGridColumns_\(context.uuid.uuidString)"
     }
+
+    private var photoHeightKey: String {
+        "photoHeight_\(context.uuid.uuidString)"
+    }
+
 
     var body: some View {
         Group {
@@ -84,6 +99,9 @@ struct SortSessionView: View {
         .onAppear {
             let stored = UserDefaults.standard.object(forKey: columnCountKey) as? Int
             columnCount = stored ?? 3
+            if let storedHeight = UserDefaults.standard.object(forKey: photoHeightKey) as? Double {
+                photoHeight = CGFloat(storedHeight)
+            }
             if hasAppeared {
                 Task { await vm?.refreshAfterReappear() }
             }
@@ -91,6 +109,9 @@ struct SortSessionView: View {
         }
         .onChange(of: columnCount) { _, newValue in
             UserDefaults.standard.set(newValue, forKey: columnCountKey)
+        }
+        .onChange(of: photoHeight) { _, newValue in
+            UserDefaults.standard.set(Double(newValue), forKey: photoHeightKey)
         }
     }
 
@@ -153,8 +174,12 @@ struct SortSessionView: View {
                         set: { id in if let id { vm.showAsset(id: id) } }
                     )
                 )
-                .frame(height: 300)
+                .frame(height: photoHeight)
                 .transition(.blurReplace)
+
+                // Resize grabber — only meaningful when the photo card is shown
+                resizeGrabber
+                    .transition(.blurReplace)
             }
 
             QueueThumbnailsView(
@@ -204,6 +229,84 @@ struct SortSessionView: View {
         } message: {
             Text("This item isn't in any of this context's destination albums. Skip it, or go back and select a destination.")
         }
+    }
+
+    // MARK: - Resize grabber
+
+    private var resizeGrabber: some View {
+        Capsule()
+            .fill(Color(.tertiaryLabel))
+            .frame(width: 36, height: 5)
+            .frame(maxWidth: .infinity)
+            .frame(height: 20)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(coordinateSpace: .global)
+                    .onChanged { value in
+                        if dragStartHeight == nil {
+                            dragStartHeight = photoHeight
+                            wasInNotch = abs(photoHeight - defaultPhotoHeight) < 1
+                        }
+                        let raw = dragStartHeight! + value.translation.height
+                        let clamped = min(maxPhotoHeight, max(minPhotoHeight, raw))
+                        let inNotch = abs(clamped - defaultPhotoHeight) <= notchRadius
+                        let target = inNotch ? applyNotch(clamped) : clamped
+
+                        if !inNotch, wasInNotch {
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        } else if inNotch, !wasInNotch {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        }
+                        wasInNotch = inNotch
+
+                        // Re-target the same interactive spring every frame. Springs
+                        // are retargetable and preserve velocity, so continued
+                        // dragging smoothly re-aims the height rather than cancelling
+                        // the catch-up that fires when we leave the notch.
+                        if reduceMotion {
+                            photoHeight = target
+                        } else {
+                            withAnimation(trackingAnimation) {
+                                photoHeight = target
+                            }
+                        }
+                    }
+                    .onEnded { value in
+                        guard let start = dragStartHeight else { return }
+                        let raw = start + value.translation.height
+                        let clamped = min(maxPhotoHeight, max(minPhotoHeight, raw))
+                        if abs(clamped - defaultPhotoHeight) <= notchRadius {
+                            withAnimation(releaseAnimation) {
+                                photoHeight = defaultPhotoHeight
+                            }
+                        }
+                        dragStartHeight = nil
+                        wasInNotch = false
+                    }
+            )
+    }
+
+    // Springy resize tracking. interactiveSpring is built for gesture-driven
+    // values: re-targeting it each frame merges with the in-flight motion
+    // (preserving velocity) instead of restarting, so the height springs to the
+    // finger and keeps following without judder.
+    private var trackingAnimation: Animation {
+        .interactiveSpring(response: 0.18, dampingFraction: 0.6, blendDuration: 0.2)
+    }
+
+    // Used for the snap-back to default on release; a quick non-bouncing ease
+    // when the user has Reduce Motion enabled.
+    private var releaseAnimation: Animation {
+        reduceMotion
+            ? .easeOut(duration: 0.2)
+            : .spring(response: 0.32, dampingFraction: 0.7)
+    }
+
+    // Damped resistance while inside the notch; callers track the finger
+    // directly once outside it.
+    private func applyNotch(_ rawHeight: CGFloat) -> CGFloat {
+        let delta = rawHeight - defaultPhotoHeight
+        return defaultPhotoHeight + delta * notchDamping
     }
 
     // MARK: - Album grid
