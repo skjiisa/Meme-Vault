@@ -52,6 +52,10 @@ final class SortSessionViewModel {
     /// the grid for the active asset.
     private(set) var extraAlbumInfos: [AlbumInfo] = []
 
+    /// Cached snapshot of pinned (non-destination) albums. Always visible in
+    /// the sort grid with reduced opacity.
+    private(set) var pinnedAlbumInfos: [AlbumInfo] = []
+
     /// Per-album refresh versions. The album grid cell observes the version
     /// for its own album only — so a tap on one album doesn't force every
     /// other cell to reload its thumbnails.
@@ -146,6 +150,7 @@ final class SortSessionViewModel {
         // Refresh cached album metadata (counts, titles) — done here rather
         // than on every body recomputation so per-tap renders stay cheap.
         refreshAlbumInfos()
+        refreshPinnedAlbumInfos()
         refreshExtraAlbumInfos()
 
         self.isLoading = false
@@ -165,6 +170,20 @@ final class SortSessionViewModel {
             infos.sort { $0.assetCount > $1.assetCount }
         }
         albumInfos = infos
+    }
+
+    private func refreshPinnedAlbumInfos() {
+        let contextIDs = Set(context.albumLocalIDs)
+        let ids = context.pinnedAlbumLocalIDs.filter { !contextIDs.contains($0) }
+        guard !ids.isEmpty else {
+            pinnedAlbumInfos = []
+            return
+        }
+        let collections = AlbumService.collections(for: ids)
+        let byID = Dictionary(uniqueKeysWithValues: collections.map {
+            ($0.localIdentifier, AlbumInfo(collection: $0))
+        })
+        pinnedAlbumInfos = ids.compactMap { byID[$0] }
     }
 
     private func refreshExtraAlbumInfos() {
@@ -207,7 +226,13 @@ final class SortSessionViewModel {
             return
         }
         var result = evaluator.albumMemberships(for: asset, in: context)
-        for albumID in extraAlbumIDs {
+        var seen = Set(result.map(\.id))
+        for albumID in context.pinnedAlbumLocalIDs where !seen.contains(albumID) {
+            let isMember = evaluator.members(of: albumID).contains(asset.localIdentifier)
+            result.append(AlbumMembership(id: albumID, isMember: isMember))
+            seen.insert(albumID)
+        }
+        for albumID in extraAlbumIDs where !seen.contains(albumID) {
             let isMember = evaluator.members(of: albumID).contains(asset.localIdentifier)
             result.append(AlbumMembership(id: albumID, isMember: isMember))
         }
@@ -343,6 +368,9 @@ final class SortSessionViewModel {
                 albumInfos.sort { $0.assetCount > $1.assetCount }
             }
         }
+        if let i = pinnedAlbumInfos.firstIndex(where: { $0.id == albumID }) {
+            pinnedAlbumInfos[i] = pinnedAlbumInfos[i].adjustingCount(by: delta)
+        }
         if let i = extraAlbumInfos.firstIndex(where: { $0.id == albumID }) {
             extraAlbumInfos[i] = extraAlbumInfos[i].adjustingCount(by: delta)
         }
@@ -351,8 +379,11 @@ final class SortSessionViewModel {
     func activateMultiSelect() {
         isMultiSelectActive = true
         let contextIDs = Set(context.albumLocalIDs)
+        let pinnedIDs = Set(context.pinnedAlbumLocalIDs)
         let allAlbums = AlbumService.listUserAlbums()
-        let nonContext = allAlbums.filter { !contextIDs.contains($0.id) }
+        let nonContext = allAlbums.filter {
+            !contextIDs.contains($0.id) && !pinnedIDs.contains($0.id)
+        }
         for album in nonContext {
             extraAlbumIDs.insert(album.id)
         }

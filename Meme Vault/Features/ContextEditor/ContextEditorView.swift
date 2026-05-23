@@ -25,10 +25,12 @@ struct ContextEditorView: View {
     @State private var sourceKind: SourceKind = .allPhotos
     @State private var sourceAlbumLocalID: String?
     @State private var albumOrder: [String] = []
+    @State private var pinnedAlbumOrder: [String] = []
     @State private var autoSortByCount: Bool = false
 
     @State private var showingSourcePicker = false
     @State private var showingAlbumPicker = false
+    @State private var showingPinnedPicker = false
     @State private var lastAutoName: String = ""
 
     /// Whether the context being edited is the default context.
@@ -87,6 +89,13 @@ struct ContextEditorView: View {
                 AlbumPicker(
                     title: "Destination Albums",
                     mode: .multi(albumSelectionBinding)
+                )
+            }
+            .sheet(isPresented: $showingPinnedPicker) {
+                AlbumPicker(
+                    title: "Pinned Albums",
+                    mode: .multi(pinnedSelectionBinding),
+                    excludeIDs: Set(albumOrder)
                 )
             }
             .onAppear(perform: setup)
@@ -194,6 +203,36 @@ struct ContextEditorView: View {
                  ? "Albums are sorted by item count, most first."
                  : "Hold and drag to reorder. Swipe to remove.")
         }
+        Section {
+            if !pinnedAlbumOrder.isEmpty {
+                ForEach(pinnedAlbumInfos, id: \.id) { info in
+                    HStack {
+                        Image(systemName: "pin")
+                            .foregroundStyle(.secondary)
+                        Text(info.title)
+                        Spacer()
+                        Text("^[\(info.assetCount) photo](inflect: true)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .onDelete { offsets in
+                    let infos = pinnedAlbumInfos
+                    for index in offsets {
+                        pinnedAlbumOrder.removeAll { $0 == infos[index].id }
+                    }
+                }
+            }
+            Button {
+                showingPinnedPicker = true
+            } label: {
+                Label("Choose Albums", systemImage: "plus")
+            }
+        } header: {
+            Text("Pinned Albums")
+        } footer: {
+            Text("Pinned albums always appear during sorting with a faded look. Tapping one enters multi-select mode.")
+        }
     }
 
     // MARK: - Setup
@@ -207,6 +246,7 @@ struct ContextEditorView: View {
             sourceKind = ctx.sourceKind
             sourceAlbumLocalID = ctx.sourceAlbumLocalID
             albumOrder = ctx.albumLocalIDs
+            pinnedAlbumOrder = ctx.pinnedAlbumLocalIDs
             autoSortByCount = ctx.autoSortAlbumsByCount
         }
     }
@@ -244,6 +284,26 @@ struct ContextEditorView: View {
         )
     }
 
+    private var pinnedSelectionBinding: Binding<Set<String>> {
+        Binding(
+            get: { Set(pinnedAlbumOrder) },
+            set: { newSet in
+                pinnedAlbumOrder.removeAll { !newSet.contains($0) }
+                for id in newSet where !pinnedAlbumOrder.contains(id) {
+                    pinnedAlbumOrder.append(id)
+                }
+            }
+        )
+    }
+
+    private var pinnedAlbumInfos: [AlbumInfo] {
+        let collections = AlbumService.collections(for: pinnedAlbumOrder)
+        let byID = Dictionary(uniqueKeysWithValues: collections.map {
+            ($0.localIdentifier, AlbumInfo(collection: $0))
+        })
+        return pinnedAlbumOrder.compactMap { byID[$0] }
+    }
+
     private var selectedAlbumInfos: [AlbumInfo] {
         let collections = AlbumService.collections(for: albumOrder)
         let byID = Dictionary(uniqueKeysWithValues: collections.map {
@@ -274,6 +334,7 @@ struct ContextEditorView: View {
                 sourceAlbumLocalID: sourceKind == .album ? sourceAlbumLocalID : nil
             )
             ctx.albumLocalIDs = orderedIDs
+            ctx.pinnedAlbumLocalIDs = pinnedAlbumOrder
             ctx.autoSortAlbumsByCount = autoSortByCount
             modelContext.insert(ctx)
         case .edit(let ctx):
@@ -281,6 +342,7 @@ struct ContextEditorView: View {
             ctx.sourceKind = sourceKind
             ctx.sourceAlbumLocalID = sourceKind == .album ? sourceAlbumLocalID : nil
             ctx.albumLocalIDs = orderedIDs
+            ctx.pinnedAlbumLocalIDs = pinnedAlbumOrder
             ctx.autoSortAlbumsByCount = autoSortByCount
         }
         try? modelContext.save()

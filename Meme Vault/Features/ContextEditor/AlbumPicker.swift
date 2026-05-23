@@ -18,6 +18,7 @@ struct AlbumPicker: View {
 
     let title: String
     let mode: Mode
+    var excludeIDs: Set<String> = []
 
     @Environment(\.dismiss) private var dismiss
     @Environment(PhotoLibrary.self) private var library
@@ -78,9 +79,12 @@ struct AlbumPicker: View {
     }
 
     private var filteredAlbums: [AlbumInfo] {
-        guard !search.isEmpty else { return albums }
-        let s = search.lowercased()
-        return albums.filter { $0.title.lowercased().contains(s) }
+        var result = excludeIDs.isEmpty ? albums : albums.filter { !excludeIDs.contains($0.id) }
+        if !search.isEmpty {
+            let s = search.lowercased()
+            result = result.filter { $0.title.lowercased().contains(s) }
+        }
+        return result
     }
 
     @ViewBuilder

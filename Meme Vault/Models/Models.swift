@@ -43,6 +43,10 @@ final class OrgContext {
 
     var uuid: UUID = UUID()
 
+    /// Non-destination albums that always appear in the sort grid (faded).
+    /// Tapping one enters multi-select mode.
+    var pinnedAlbumLocalIDs: [String] = []
+
     /// When true, destination albums are sorted by item count (most first)
     /// instead of the manual order stored in `albumLocalIDs`.
     var autoSortAlbumsByCount: Bool = false
