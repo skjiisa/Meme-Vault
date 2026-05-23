@@ -163,7 +163,7 @@ struct SortSessionView: View {
                     )
                 )
                 .frame(height: 300)
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                .transition(.blurReplace)
             }
 
             QueueThumbnailsView(
