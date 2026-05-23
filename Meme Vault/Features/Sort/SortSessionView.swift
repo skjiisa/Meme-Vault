@@ -208,13 +208,14 @@ struct SortSessionView: View {
         let infos = vm.albumInfos
         let extras = vm.extraAlbumInfos
         let memberIDs = Set(vm.memberships.filter(\.isMember).map(\.id))
-        let bulkDisabled = vm.isBulkMode && vm.bulkSelectedIDs.isEmpty
+        let bulkDirect = vm.isBulkMode && !vm.isMultiSelectActive
+        let bulkDisabled = bulkDirect && vm.bulkSelectedIDs.isEmpty
         ScrollView {
             LazyVGrid(columns: albumColumns, spacing: 8) {
                 ForEach(infos, id: \.id) { info in
                     let isMember = memberIDs.contains(info.id)
                     Button {
-                        if vm.isBulkMode {
+                        if bulkDirect {
                             Task {
                                 await vm.bulkSortToAlbum(info.id)
                                 if case .bulkSorted = vm.lastAction { showToast() }
@@ -230,7 +231,7 @@ struct SortSessionView: View {
                             albumID: info.id,
                             title: info.title,
                             count: info.assetCount,
-                            isMember: vm.isBulkMode ? false : isMember,
+                            isMember: bulkDirect ? false : isMember,
                             refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
                         )
                     }
@@ -242,58 +243,62 @@ struct SortSessionView: View {
                         }
                     }
                 }
-                if !vm.isBulkMode {
-                    ForEach(vm.pinnedAlbumInfos, id: \.id) { info in
-                        let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
-                        Button {
+                ForEach(vm.pinnedAlbumInfos, id: \.id) { info in
+                    let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
+                    Button {
+                        if bulkDirect {
+                            Task {
+                                await vm.bulkSortToAlbum(info.id)
+                                if case .bulkSorted = vm.lastAction { showToast() }
+                            }
+                        } else {
                             if !vm.isMultiSelectActive {
                                 vm.activateMultiSelect()
                             }
-                            Task {
-                                await vm.toggleAlbum(info.id)
-                            }
-                        } label: {
-                            AlbumGridCell(
-                                albumID: info.id,
-                                title: info.title,
-                                count: info.assetCount,
-                                isMember: isMember,
-                                refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
-                            )
-                            .opacity(isMember ? 1 : 0.6)
+                            Task { await vm.toggleAlbum(info.id) }
                         }
-                        .buttonStyle(.plain)
-                        .contextMenu {
-                            Button("View Contents", systemImage: "photo.on.rectangle") {
-                                viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
-                            }
+                    } label: {
+                        AlbumGridCell(
+                            albumID: info.id,
+                            title: info.title,
+                            count: info.assetCount,
+                            isMember: bulkDirect ? false : isMember,
+                            refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
+                        )
+                        .opacity(isMember ? 1 : 0.6)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(bulkDisabled)
+                    .contextMenu {
+                        Button("View Contents", systemImage: "photo.on.rectangle") {
+                            viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
                         }
                     }
-                    ForEach(extras, id: \.id) { info in
-                        let isMember = memberIDs.contains(info.id)
-                        Button {
-                            Task {
-                                await vm.toggleAlbum(info.id)
-                                if case .sorted = vm.lastAction { showToast() }
-                            }
-                        } label: {
-                            AlbumGridCell(
-                                albumID: info.id,
-                                title: info.title,
-                                count: info.assetCount,
-                                isMember: isMember,
-                                refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
-                            )
-                            .opacity(isMember ? 1 : 0.6)
+                }
+                ForEach(extras, id: \.id) { info in
+                    let isMember = memberIDs.contains(info.id)
+                    Button {
+                        Task {
+                            await vm.toggleAlbum(info.id)
+                            if case .sorted = vm.lastAction { showToast() }
                         }
-                        .buttonStyle(.plain)
-                        .contextMenu {
-                            Button("View Contents", systemImage: "photo.on.rectangle") {
-                                viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
-                            }
-                        }
-                        .transition(.opacity.combined(with: .offset(y: 20)))
+                    } label: {
+                        AlbumGridCell(
+                            albumID: info.id,
+                            title: info.title,
+                            count: info.assetCount,
+                            isMember: isMember,
+                            refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
+                        )
+                        .opacity(isMember ? 1 : 0.6)
                     }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("View Contents", systemImage: "photo.on.rectangle") {
+                            viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
+                        }
+                    }
+                    .transition(.opacity.combined(with: .offset(y: 20)))
                 }
             }
             .padding(.horizontal)
@@ -307,7 +312,8 @@ struct SortSessionView: View {
     // MARK: - Control bar
 
     private func controlBar(vm: SortSessionViewModel) -> some View {
-        HStack {
+        let bulkNoSelection = vm.isBulkMode && vm.bulkSelectedIDs.isEmpty
+        return HStack {
             Button {
                 Task { await vm.undo(); showUndoToast = false }
             } label: {
@@ -318,36 +324,49 @@ struct SortSessionView: View {
 
             Spacer()
 
-            if !vm.isBulkMode {
-                Button {
+            Button {
+                if vm.isBulkMode {
+                    Task { await vm.bulkQueueDelete(); showToast() }
+                } else {
                     Task { await vm.queueDelete(); showToast() }
-                } label: {
-                    Image(systemName: "trash")
-                        .frame(width: 44, height: 36)
-                        .foregroundStyle(.red)
                 }
-
-                Spacer()
-
-                Button {
-                    Task { await vm.skip(); showToast() }
-                } label: {
-                    Image(systemName: "arrow.right.to.line")
-                        .frame(width: 44, height: 36)
-                }
-
-                Spacer()
-
-                Button {
-                    Task { await vm.toggleFavorite() }
-                } label: {
-                    Image(systemName: vm.isFavorite ? "heart.fill" : "heart")
-                        .frame(width: 44, height: 36)
-                        .foregroundStyle(vm.isFavorite ? .yellow : .secondary)
-                }
-
-                Spacer()
+            } label: {
+                Image(systemName: "trash")
+                    .frame(width: 44, height: 36)
+                    .foregroundStyle(.red)
             }
+            .disabled(bulkNoSelection)
+
+            Spacer()
+
+            Button {
+                if vm.isBulkMode {
+                    Task { await vm.bulkSkip(); showToast() }
+                } else {
+                    Task { await vm.skip(); showToast() }
+                }
+            } label: {
+                Image(systemName: "arrow.right.to.line")
+                    .frame(width: 44, height: 36)
+            }
+            .disabled(bulkNoSelection)
+
+            Spacer()
+
+            Button {
+                if vm.isBulkMode {
+                    Task { await vm.bulkToggleFavorite() }
+                } else {
+                    Task { await vm.toggleFavorite() }
+                }
+            } label: {
+                Image(systemName: vm.isFavorite ? "heart.fill" : "heart")
+                    .frame(width: 44, height: 36)
+                    .foregroundStyle(vm.isFavorite ? .yellow : .secondary)
+            }
+            .disabled(bulkNoSelection)
+
+            Spacer()
 
             Button {
                 withAnimation(.easeInOut(duration: 0.2)) {
@@ -371,21 +390,20 @@ struct SortSessionView: View {
             }
             .disabled(columnCount <= 2)
 
-            if !vm.isBulkMode {
-                Button {
-                    if vm.isMultiSelectActive {
-                        Task {
-                            await vm.deactivateMultiSelect()
-                            if case .sortedMulti = vm.lastAction { showToast() }
-                        }
-                    } else {
-                        vm.activateMultiSelect()
+            Button {
+                if vm.isMultiSelectActive {
+                    Task {
+                        await vm.deactivateMultiSelect()
+                        if case .sortedMulti = vm.lastAction { showToast() }
+                        if case .bulkSorted = vm.lastAction { showToast() }
                     }
-                } label: {
-                    Image(systemName: vm.isMultiSelectActive ? "rectangle.stack.fill" : "rectangle.stack")
-                        .frame(width: 44, height: 36)
-                        .foregroundStyle(vm.isMultiSelectActive ? Color.accentColor : Color.primary)
+                } else {
+                    vm.activateMultiSelect()
                 }
+            } label: {
+                Image(systemName: vm.isMultiSelectActive ? "rectangle.stack.fill" : "rectangle.stack")
+                    .frame(width: 44, height: 36)
+                    .foregroundStyle(vm.isMultiSelectActive ? Color.accentColor : Color.primary)
             }
 
             Button {
@@ -427,8 +445,12 @@ struct SortSessionView: View {
             case .sortedMulti: return "Sorted"
             case .skipped: return "Skipped"
             case .queuedDelete: return "Queued for deletion"
-            case .bulkSorted(_, let removed, _):
+            case .bulkSorted(_, _, let removed):
                 return "Sorted \(removed.count) photo\(removed.count == 1 ? "" : "s")"
+            case .bulkSkipped(let ids):
+                return "Skipped \(ids.count) photo\(ids.count == 1 ? "" : "s")"
+            case .bulkDeleted(let ids):
+                return "Queued \(ids.count) for deletion"
             }
         }()
         return HStack {

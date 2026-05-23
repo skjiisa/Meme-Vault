@@ -39,9 +39,14 @@ struct QueueThumbnailsView: View {
                         }
                         .buttonStyle(.plain)
                         .matchedGeometryEffect(id: id, in: namespace)
+                        .transition(.asymmetric(
+                            insertion: .scale(scale: 0.8).combined(with: .opacity),
+                            removal: .scale(scale: 0.5).combined(with: .opacity)
+                        ))
                     }
                 }
                 .padding(.horizontal)
+                .animation(.easeInOut(duration: 0.3), value: assetIDs)
             }
         } else if !assetIDs.isEmpty {
             ScrollViewReader { proxy in
