@@ -219,8 +219,10 @@ struct SortSessionView: View {
                         let inNotch = abs(clamped - defaultPhotoHeight) <= notchRadius
                         let target = inNotch ? applyNotch(clamped) : clamped
 
-                        if !inNotch && wasInNotch {
+                        if !inNotch, wasInNotch {
                             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        } else if inNotch, !wasInNotch {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         }
                         wasInNotch = inNotch
 
@@ -256,7 +258,7 @@ struct SortSessionView: View {
     // (preserving velocity) instead of restarting, so the height springs to the
     // finger and keeps following without judder.
     private var trackingAnimation: Animation {
-        .interactiveSpring(response: 0.3, dampingFraction: 0.72, blendDuration: 0.25)
+        .interactiveSpring(response: 0.18, dampingFraction: 0.6, blendDuration: 0.2)
     }
 
     // Used for the snap-back to default on release; a quick non-bouncing ease
