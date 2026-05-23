@@ -191,8 +191,10 @@ struct SortSessionView: View {
                 .transition(.blurReplace)
             }
 
-            // Resize grabber — drives photoHeight in both browse and grid modes.
-            resizeGrabber
+            // Resize grabber — drives photoHeight in both modes. The snap-to-
+            // default notch only applies in browse mode; the grid has no
+            // meaningful default height, so there it tracks the finger freely.
+            resizeGrabber(notchEnabled: !vm.isBulkMode)
 
             // Browse mode keeps the horizontal queue strip below the grabber.
             if !vm.isBulkMode {
@@ -242,7 +244,7 @@ struct SortSessionView: View {
 
     // MARK: - Resize grabber
 
-    private var resizeGrabber: some View {
+    private func resizeGrabber(notchEnabled: Bool) -> some View {
         Capsule()
             .fill(Color(.tertiaryLabel))
             .frame(width: 36, height: 5)
@@ -254,11 +256,11 @@ struct SortSessionView: View {
                     .onChanged { value in
                         if dragStartHeight == nil {
                             dragStartHeight = photoHeight
-                            wasInNotch = abs(photoHeight - defaultPhotoHeight) < 1
+                            wasInNotch = notchEnabled && abs(photoHeight - defaultPhotoHeight) < 1
                         }
                         let raw = dragStartHeight! + value.translation.height
                         let clamped = min(maxPhotoHeight, max(minPhotoHeight, raw))
-                        let inNotch = abs(clamped - defaultPhotoHeight) <= notchRadius
+                        let inNotch = notchEnabled && abs(clamped - defaultPhotoHeight) <= notchRadius
                         let target = inNotch ? applyNotch(clamped) : clamped
 
                         if !inNotch, wasInNotch {
@@ -284,7 +286,7 @@ struct SortSessionView: View {
                         guard let start = dragStartHeight else { return }
                         let raw = start + value.translation.height
                         let clamped = min(maxPhotoHeight, max(minPhotoHeight, raw))
-                        if abs(clamped - defaultPhotoHeight) <= notchRadius {
+                        if notchEnabled, abs(clamped - defaultPhotoHeight) <= notchRadius {
                             withAnimation(releaseAnimation) {
                                 photoHeight = defaultPhotoHeight
                             }
