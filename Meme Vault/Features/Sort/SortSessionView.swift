@@ -204,6 +204,32 @@ struct SortSessionView: View {
                         }
                     }
                 }
+                ForEach(vm.pinnedAlbumInfos, id: \.id) { info in
+                    let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
+                    Button {
+                        if !vm.isMultiSelectActive {
+                            vm.activateMultiSelect()
+                        }
+                        Task {
+                            await vm.toggleAlbum(info.id)
+                        }
+                    } label: {
+                        AlbumGridCell(
+                            albumID: info.id,
+                            title: info.title,
+                            count: info.assetCount,
+                            isMember: isMember,
+                            refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
+                        )
+                        .opacity(isMember ? 1 : 0.6)
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("View Contents", systemImage: "photo.on.rectangle") {
+                            viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
+                        }
+                    }
+                }
                 ForEach(extras, id: \.id) { info in
                     let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
                     Button {
@@ -232,6 +258,7 @@ struct SortSessionView: View {
             }
             .padding(.horizontal)
             .animation(.easeInOut(duration: 0.25), value: infos.map(\.id))
+            .animation(.easeInOut(duration: 0.25), value: vm.pinnedAlbumInfos.map(\.id))
             .animation(.easeInOut(duration: 0.25), value: vm.extraAlbumIDs)
             .animation(.easeInOut(duration: 0.25), value: vm.isMultiSelectActive)
         }

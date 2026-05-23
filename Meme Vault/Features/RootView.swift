@@ -125,9 +125,11 @@ struct RootView: View {
                 })
             }
             .alert("Debug: Clear Album Membership", isPresented: $showingDebugConfirm) {
+                #if DEBUG
                 Button("Remove All", role: .destructive) {
                     Task { await debugClearAlbums() }
                 }
+                #endif
                 Button("Cancel", role: .cancel) { }
             } message: {
                 Text("This will remove every photo from every album and clear all skipped photos. Photos will NOT be deleted. This cannot be undone.")
