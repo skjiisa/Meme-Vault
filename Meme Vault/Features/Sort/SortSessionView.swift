@@ -15,16 +15,12 @@ struct SortSessionView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(PhotoLibrary.self) private var library
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var vm: SortSessionViewModel?
     @State private var showUndoToast = false
     @State private var undoTimer: Task<Void, Never>?
     @State private var showingContextEditor = false
     @State private var columnCount = 3
-    @State private var photoHeight: CGFloat = 300
-    @State private var dragStartHeight: CGFloat?
-    @State private var wasInNotch = false
     @State private var hasAppeared = false
     @State private var viewingAlbum: AlbumSheetItem?
     @State private var topSafeInset: CGFloat = 0
@@ -37,12 +33,6 @@ struct SortSessionView: View {
     private var bottomSafeInset: CGFloat {
         max(0, screenHeight - contentMaxY)
     }
-
-    private let minPhotoHeight: CGFloat = 120
-    private let maxPhotoHeight: CGFloat = 500
-    private let defaultPhotoHeight: CGFloat = 300
-    private let notchRadius: CGFloat = 30
-    private let notchDamping: CGFloat = 0.25
 
     private var columnCountKey: String {
         "albumGridColumns_\(context.uuid.uuidString)"
@@ -122,9 +112,6 @@ struct SortSessionView: View {
         .onAppear {
             let stored = UserDefaults.standard.object(forKey: columnCountKey) as? Int
             columnCount = stored ?? 3
-            if let storedHeight = UserDefaults.standard.object(forKey: photoHeightKey) as? Double {
-                photoHeight = CGFloat(storedHeight)
-            }
             if hasAppeared {
                 Task { await vm?.refreshAfterReappear() }
             }
@@ -132,9 +119,6 @@ struct SortSessionView: View {
         }
         .onChange(of: columnCount) { _, newValue in
             UserDefaults.standard.set(newValue, forKey: columnCountKey)
-        }
-        .onChange(of: photoHeight) { _, newValue in
-            UserDefaults.standard.set(Double(newValue), forKey: photoHeightKey)
         }
     }
 
@@ -186,53 +170,17 @@ struct SortSessionView: View {
                 .padding(.horizontal)
             }
 
-            // Resizable media region — the browse card or the selection grid.
-            // Both honor photoHeight, so the region keeps its size across a
-            // bulk-mode toggle and the grabber always sits directly below it.
-            if vm.isBulkMode {
-                // The grid extends up under the translucent nav bar; its
-                // ScrollView re-adds a content inset equal to the consumed
-                // safe area, so resting content stays below the bar while
-                // scrolling reveals it underneath. The selection count is a
-                // sibling in the ZStack (not inside the safe-area-ignoring
-                // grid), so it floats just below the bar.
-                ZStack(alignment: .topLeading) {
-                    QueueThumbnailsView(
-                        assetIDs: vm.queue,
-                        isBulkMode: true,
-                        currentID: vm.currentAssetID,
-                        selectedIDs: vm.bulkSelectedIDs,
-                        onTap: { vm.toggleBulkSelection($0) },
-                        namespace: thumbnailNamespace
-                    )
-                    .contentMargins(.top, topSafeInset)
-                    .ignoresSafeArea(.container, edges: .top)
-
-                    Text("\(vm.bulkSelectedIDs.count) selected")
-                        .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .padding(.top, 8)
-                        .padding(.leading, 8)
-                }
-                .frame(height: photoHeight)
-            } else {
-                PhotoCardView(
-                    assetIDs: vm.queue,
-                    currentID: Binding(
-                        get: { vm.currentAssetID },
-                        set: { id in if let id { vm.showAsset(id: id) } }
-                    )
-                )
-                .frame(height: photoHeight)
-                .transition(.blurReplace)
-            }
-
-            // Resize grabber — drives photoHeight in both modes. The snap-to-
-            // default notch only applies in browse mode; the grid has no
-            // meaningful default height, so there it tracks the finger freely.
-            resizeGrabber(notchEnabled: !vm.isBulkMode)
+            // Resizable media region (browse card or selection grid) plus its
+            // resize grabber, extracted into a child view that owns photoHeight.
+            // Dragging the grabber then re-evaluates only that subtree, leaving
+            // the album grid, control bar, and queue strip — siblings here —
+            // out of the per-frame invalidation scope.
+            MediaRegionView(
+                vm: vm,
+                namespace: thumbnailNamespace,
+                topSafeInset: topSafeInset,
+                photoHeightKey: photoHeightKey
+            )
 
             // Browse mode keeps the horizontal queue strip below the grabber.
             if !vm.isBulkMode {
@@ -281,84 +229,6 @@ struct SortSessionView: View {
         } message: {
             Text("This item isn't in any of this context's destination albums. Skip it, or go back and select a destination.")
         }
-    }
-
-    // MARK: - Resize grabber
-
-    private func resizeGrabber(notchEnabled: Bool) -> some View {
-        Capsule()
-            .fill(Color(.tertiaryLabel))
-            .frame(width: 36, height: 5)
-            .frame(maxWidth: .infinity)
-            .frame(height: 20)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(coordinateSpace: .global)
-                    .onChanged { value in
-                        if dragStartHeight == nil {
-                            dragStartHeight = photoHeight
-                            wasInNotch = notchEnabled && abs(photoHeight - defaultPhotoHeight) < 1
-                        }
-                        let raw = dragStartHeight! + value.translation.height
-                        let clamped = min(maxPhotoHeight, max(minPhotoHeight, raw))
-                        let inNotch = notchEnabled && abs(clamped - defaultPhotoHeight) <= notchRadius
-                        let target = inNotch ? applyNotch(clamped) : clamped
-
-                        if !inNotch, wasInNotch {
-                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        } else if inNotch, !wasInNotch {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        }
-                        wasInNotch = inNotch
-
-                        // Re-target the same interactive spring every frame. Springs
-                        // are retargetable and preserve velocity, so continued
-                        // dragging smoothly re-aims the height rather than cancelling
-                        // the catch-up that fires when we leave the notch.
-                        if reduceMotion {
-                            photoHeight = target
-                        } else {
-                            withAnimation(trackingAnimation) {
-                                photoHeight = target
-                            }
-                        }
-                    }
-                    .onEnded { value in
-                        guard let start = dragStartHeight else { return }
-                        let raw = start + value.translation.height
-                        let clamped = min(maxPhotoHeight, max(minPhotoHeight, raw))
-                        if notchEnabled, abs(clamped - defaultPhotoHeight) <= notchRadius {
-                            withAnimation(releaseAnimation) {
-                                photoHeight = defaultPhotoHeight
-                            }
-                        }
-                        dragStartHeight = nil
-                        wasInNotch = false
-                    }
-            )
-    }
-
-    // Springy resize tracking. interactiveSpring is built for gesture-driven
-    // values: re-targeting it each frame merges with the in-flight motion
-    // (preserving velocity) instead of restarting, so the height springs to the
-    // finger and keeps following without judder.
-    private var trackingAnimation: Animation {
-        .interactiveSpring(response: 0.18, dampingFraction: 0.6, blendDuration: 0.2)
-    }
-
-    // Used for the snap-back to default on release; a quick non-bouncing ease
-    // when the user has Reduce Motion enabled.
-    private var releaseAnimation: Animation {
-        reduceMotion
-            ? .easeOut(duration: 0.2)
-            : .spring(response: 0.32, dampingFraction: 0.7)
-    }
-
-    // Damped resistance while inside the notch; callers track the finger
-    // directly once outside it.
-    private func applyNotch(_ rawHeight: CGFloat) -> CGFloat {
-        let delta = rawHeight - defaultPhotoHeight
-        return defaultPhotoHeight + delta * notchDamping
     }
 
     // MARK: - Album grid
@@ -621,6 +491,169 @@ struct SortSessionView: View {
         .background(.ultraThinMaterial, in: Capsule())
         .padding(.horizontal, 24)
         .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+}
+
+// MARK: - Media region
+
+/// The resizable media region — the browse card or the bulk-selection grid —
+/// plus the resize grabber that drives its height. `photoHeight` lives here
+/// rather than in `SortSessionView` so a resize drag re-evaluates only this
+/// subtree; the album grid, control bar, and queue strip are siblings in the
+/// parent and stay out of the per-frame invalidation scope. Identity is stable
+/// across a bulk-mode toggle (the parent always builds this view in the same
+/// slot), so the region keeps its size when switching modes.
+private struct MediaRegionView: View {
+    let vm: SortSessionViewModel
+    let namespace: Namespace.ID
+    let topSafeInset: CGFloat
+    let photoHeightKey: String
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    @State private var photoHeight: CGFloat = 300
+    @State private var dragStartHeight: CGFloat?
+    @State private var wasInNotch = false
+
+    private let minPhotoHeight: CGFloat = 120
+    private let maxPhotoHeight: CGFloat = 500
+    private let defaultPhotoHeight: CGFloat = 300
+    private let notchRadius: CGFloat = 30
+    private let notchDamping: CGFloat = 0.25
+
+    var body: some View {
+        VStack(spacing: 6) {
+            if vm.isBulkMode {
+                // The grid extends up under the translucent nav bar; its
+                // ScrollView re-adds a content inset equal to the consumed
+                // safe area, so resting content stays below the bar while
+                // scrolling reveals it underneath. The selection count is a
+                // sibling in the ZStack (not inside the safe-area-ignoring
+                // grid), so it floats just below the bar.
+                ZStack(alignment: .topLeading) {
+                    QueueThumbnailsView(
+                        assetIDs: vm.queue,
+                        isBulkMode: true,
+                        currentID: vm.currentAssetID,
+                        selectedIDs: vm.bulkSelectedIDs,
+                        onTap: { vm.toggleBulkSelection($0) },
+                        namespace: namespace
+                    )
+                    .contentMargins(.top, topSafeInset)
+                    .ignoresSafeArea(.container, edges: .top)
+
+                    Text("\(vm.bulkSelectedIDs.count) selected")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .padding(.top, 8)
+                        .padding(.leading, 8)
+                }
+                .frame(height: photoHeight)
+            } else {
+                PhotoCardView(
+                    assetIDs: vm.queue,
+                    currentID: Binding(
+                        get: { vm.currentAssetID },
+                        set: { id in if let id { vm.showAsset(id: id) } }
+                    )
+                )
+                .frame(height: photoHeight)
+                .transition(.blurReplace)
+            }
+
+            // Resize grabber — drives photoHeight in both modes. The snap-to-
+            // default notch only applies in browse mode; the grid has no
+            // meaningful default height, so there it tracks the finger freely.
+            resizeGrabber(notchEnabled: !vm.isBulkMode)
+        }
+        .onAppear {
+            if let stored = UserDefaults.standard.object(forKey: photoHeightKey) as? Double {
+                photoHeight = CGFloat(stored)
+            }
+        }
+        .onChange(of: photoHeight) { _, newValue in
+            UserDefaults.standard.set(Double(newValue), forKey: photoHeightKey)
+        }
+    }
+
+    // MARK: - Resize grabber
+
+    private func resizeGrabber(notchEnabled: Bool) -> some View {
+        Capsule()
+            .fill(Color(.tertiaryLabel))
+            .frame(width: 36, height: 5)
+            .frame(maxWidth: .infinity)
+            .frame(height: 20)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(coordinateSpace: .global)
+                    .onChanged { value in
+                        if dragStartHeight == nil {
+                            dragStartHeight = photoHeight
+                            wasInNotch = notchEnabled && abs(photoHeight - defaultPhotoHeight) < 1
+                        }
+                        let raw = dragStartHeight! + value.translation.height
+                        let clamped = min(maxPhotoHeight, max(minPhotoHeight, raw))
+                        let inNotch = notchEnabled && abs(clamped - defaultPhotoHeight) <= notchRadius
+                        let target = inNotch ? applyNotch(clamped) : clamped
+
+                        if !inNotch, wasInNotch {
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        } else if inNotch, !wasInNotch {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        }
+                        wasInNotch = inNotch
+
+                        // Re-target the same interactive spring every frame. Springs
+                        // are retargetable and preserve velocity, so continued
+                        // dragging smoothly re-aims the height rather than cancelling
+                        // the catch-up that fires when we leave the notch.
+                        if reduceMotion {
+                            photoHeight = target
+                        } else {
+                            withAnimation(trackingAnimation) {
+                                photoHeight = target
+                            }
+                        }
+                    }
+                    .onEnded { value in
+                        guard let start = dragStartHeight else { return }
+                        let raw = start + value.translation.height
+                        let clamped = min(maxPhotoHeight, max(minPhotoHeight, raw))
+                        if notchEnabled, abs(clamped - defaultPhotoHeight) <= notchRadius {
+                            withAnimation(releaseAnimation) {
+                                photoHeight = defaultPhotoHeight
+                            }
+                        }
+                        dragStartHeight = nil
+                        wasInNotch = false
+                    }
+            )
+    }
+
+    // Springy resize tracking. interactiveSpring is built for gesture-driven
+    // values: re-targeting it each frame merges with the in-flight motion
+    // (preserving velocity) instead of restarting, so the height springs to the
+    // finger and keeps following without judder.
+    private var trackingAnimation: Animation {
+        .interactiveSpring(response: 0.18, dampingFraction: 0.6, blendDuration: 0.2)
+    }
+
+    // Used for the snap-back to default on release; a quick non-bouncing ease
+    // when the user has Reduce Motion enabled.
+    private var releaseAnimation: Animation {
+        reduceMotion
+            ? .easeOut(duration: 0.2)
+            : .spring(response: 0.32, dampingFraction: 0.7)
+    }
+
+    // Damped resistance while inside the notch; callers track the finger
+    // directly once outside it.
+    private func applyNotch(_ rawHeight: CGFloat) -> CGFloat {
+        let delta = rawHeight - defaultPhotoHeight
+        return defaultPhotoHeight + delta * notchDamping
     }
 }
 
