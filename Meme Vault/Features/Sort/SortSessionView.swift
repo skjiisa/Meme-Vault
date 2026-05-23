@@ -23,11 +23,15 @@ struct SortSessionView: View {
     @State private var columnCount = 3
     @State private var photoHeight: CGFloat = 300
     @State private var dragStartHeight: CGFloat?
+    @State private var wasInNotch = false
     @State private var hasAppeared = false
     @State private var viewingAlbum: AlbumSheetItem?
 
     private let minPhotoHeight: CGFloat = 120
     private let maxPhotoHeight: CGFloat = 500
+    private let defaultPhotoHeight: CGFloat = 300
+    private let notchRadius: CGFloat = 30
+    private let notchDamping: CGFloat = 0.25
 
     private var columnCountKey: String {
         "albumGridColumns_\(context.uuid.uuidString)"
@@ -199,7 +203,7 @@ struct SortSessionView: View {
             .contentShape(Rectangle())
             .onTapGesture(count: 2) {
                 withAnimation(.easeInOut(duration: 0.25)) {
-                    photoHeight = 300
+                    photoHeight = defaultPhotoHeight
                 }
             }
             .gesture(
@@ -207,13 +211,42 @@ struct SortSessionView: View {
                     .onChanged { value in
                         if dragStartHeight == nil {
                             dragStartHeight = photoHeight
+                            wasInNotch = abs(photoHeight - defaultPhotoHeight) < 1
                         }
-                        photoHeight = min(maxPhotoHeight, max(minPhotoHeight, dragStartHeight! + value.translation.height))
+                        let raw = dragStartHeight! + value.translation.height
+                        let clamped = min(maxPhotoHeight, max(minPhotoHeight, raw))
+                        let inNotch = abs(clamped - defaultPhotoHeight) <= notchRadius
+
+                        if !inNotch && wasInNotch {
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        }
+                        wasInNotch = inNotch
+
+                        photoHeight = applyNotch(clamped)
                     }
-                    .onEnded { _ in
+                    .onEnded { value in
+                        let raw = dragStartHeight! + value.translation.height
+                        let clamped = min(maxPhotoHeight, max(minPhotoHeight, raw))
+                        if abs(clamped - defaultPhotoHeight) <= notchRadius {
+                            withAnimation(.smooth(duration: 0.25)) {
+                                photoHeight = defaultPhotoHeight
+                            }
+                        }
                         dragStartHeight = nil
+                        wasInNotch = false
                     }
             )
+    }
+
+    private func applyNotch(_ rawHeight: CGFloat) -> CGFloat {
+        let delta = rawHeight - defaultPhotoHeight
+        let absDelta = abs(delta)
+        if absDelta <= notchRadius {
+            return defaultPhotoHeight + delta * notchDamping
+        }
+        let sign: CGFloat = delta > 0 ? 1 : -1
+        let overshoot = absDelta - notchRadius
+        return defaultPhotoHeight + sign * (notchRadius * notchDamping + overshoot)
     }
 
     // MARK: - Album grid
