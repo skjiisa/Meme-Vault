@@ -15,6 +15,7 @@ struct SortSessionView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(PhotoLibrary.self) private var library
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var vm: SortSessionViewModel?
     @State private var showUndoToast = false
@@ -216,19 +217,31 @@ struct SortSessionView: View {
                         let raw = dragStartHeight! + value.translation.height
                         let clamped = min(maxPhotoHeight, max(minPhotoHeight, raw))
                         let inNotch = abs(clamped - defaultPhotoHeight) <= notchRadius
+                        let target = inNotch ? applyNotch(clamped) : clamped
 
                         if !inNotch && wasInNotch {
                             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                         }
                         wasInNotch = inNotch
 
-                        photoHeight = applyNotch(clamped)
+                        // Re-target the same interactive spring every frame. Springs
+                        // are retargetable and preserve velocity, so continued
+                        // dragging smoothly re-aims the height rather than cancelling
+                        // the catch-up that fires when we leave the notch.
+                        if reduceMotion {
+                            photoHeight = target
+                        } else {
+                            withAnimation(trackingAnimation) {
+                                photoHeight = target
+                            }
+                        }
                     }
                     .onEnded { value in
-                        let raw = dragStartHeight! + value.translation.height
+                        guard let start = dragStartHeight else { return }
+                        let raw = start + value.translation.height
                         let clamped = min(maxPhotoHeight, max(minPhotoHeight, raw))
                         if abs(clamped - defaultPhotoHeight) <= notchRadius {
-                            withAnimation(.smooth(duration: 0.25)) {
+                            withAnimation(releaseAnimation) {
                                 photoHeight = defaultPhotoHeight
                             }
                         }
@@ -238,15 +251,27 @@ struct SortSessionView: View {
             )
     }
 
+    // Springy resize tracking. interactiveSpring is built for gesture-driven
+    // values: re-targeting it each frame merges with the in-flight motion
+    // (preserving velocity) instead of restarting, so the height springs to the
+    // finger and keeps following without judder.
+    private var trackingAnimation: Animation {
+        .interactiveSpring(response: 0.3, dampingFraction: 0.72, blendDuration: 0.25)
+    }
+
+    // Used for the snap-back to default on release; a quick non-bouncing ease
+    // when the user has Reduce Motion enabled.
+    private var releaseAnimation: Animation {
+        reduceMotion
+            ? .easeOut(duration: 0.2)
+            : .spring(response: 0.32, dampingFraction: 0.7)
+    }
+
+    // Damped resistance while inside the notch; callers track the finger
+    // directly once outside it.
     private func applyNotch(_ rawHeight: CGFloat) -> CGFloat {
         let delta = rawHeight - defaultPhotoHeight
-        let absDelta = abs(delta)
-        if absDelta <= notchRadius {
-            return defaultPhotoHeight + delta * notchDamping
-        }
-        let sign: CGFloat = delta > 0 ? 1 : -1
-        let overshoot = absDelta - notchRadius
-        return defaultPhotoHeight + sign * (notchRadius * notchDamping + overshoot)
+        return defaultPhotoHeight + delta * notchDamping
     }
 
     // MARK: - Album grid
