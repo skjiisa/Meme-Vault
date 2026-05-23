@@ -68,6 +68,7 @@ private struct PhotoPage: View {
     let targetSize: CGSize
 
     @State private var image: UIImage?
+    @State private var backdrop: UIImage?
     @State private var phase: Phase = .loading
 
     private enum Phase { case loading, loaded, missing }
@@ -80,15 +81,20 @@ private struct PhotoPage: View {
             switch phase {
             case .loaded:
                 if let image {
-                    Color.black
-                        .overlay {
-                            Image(uiImage: image)
-                                .resizable()
-                                .scaledToFill()
-                        }
-                        .clipped()
-                        .blur(radius: 20)
-                        .opacity(0.8)
+                    // Blurred fill behind the letterboxed photo. At radius 20 the
+                    // source detail is gone anyway, so we blur a tiny downsampled
+                    // copy — same look, a fraction of the per-frame composite cost.
+                    if let backdrop {
+                        Color.black
+                            .overlay {
+                                Image(uiImage: backdrop)
+                                    .resizable()
+                                    .scaledToFill()
+                            }
+                            .clipped()
+                            .blur(radius: 20)
+                            .opacity(0.8)
+                    }
 
                     Image(uiImage: image)
                         .resizable()
@@ -105,6 +111,7 @@ private struct PhotoPage: View {
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .task(id: assetID) {
             image = nil
+            backdrop = nil
             phase = .loading
             guard let asset = AlbumService.asset(for: assetID) else {
                 phase = .missing
@@ -114,6 +121,27 @@ private struct PhotoPage: View {
             guard !Task.isCancelled else { return }
             image = loaded
             phase = (loaded == nil) ? .missing : .loaded
+            if let loaded {
+                backdrop = Self.downsampledBackdrop(from: loaded)
+            }
+        }
+    }
+
+    /// A small copy of the page image used only as the blurred fill. A 60pt
+    /// longest edge is well below what a radius-20 blur can resolve, so the
+    /// blur composites over a handful of pixels instead of the full rendition.
+    private static func downsampledBackdrop(from image: UIImage) -> UIImage {
+        let maxDimension: CGFloat = 60
+        let longest = max(image.size.width, image.size.height)
+        guard longest > maxDimension else { return image }
+        let scale = maxDimension / longest
+        let newSize = CGSize(width: image.size.width * scale,
+                             height: image.size.height * scale)
+        let format = UIGraphicsImageRendererFormat.preferred()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: newSize, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: newSize))
         }
     }
 }
