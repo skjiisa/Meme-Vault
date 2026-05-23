@@ -10,7 +10,7 @@
 
 import SwiftUI
 import Photos
-import AVKit
+import AVFoundation
 
 struct PhotoCardView: View {
     let assetIDs: [String]
@@ -33,7 +33,7 @@ struct PhotoCardView: View {
             ScrollView(.horizontal) {
                 LazyHStack(spacing: spacing) {
                     ForEach(assetIDs, id: \.self) { id in
-                        PhotoPage(assetID: id, targetSize: pixelSize)
+                        PhotoPage(assetID: id, isCurrent: id == currentID, targetSize: pixelSize)
                             .frame(width: pageWidth, height: pageHeight)
                     }
                 }
@@ -66,12 +66,14 @@ struct PhotoCardView: View {
 
 private struct PhotoPage: View {
     let assetID: String
+    let isCurrent: Bool
     let targetSize: CGSize
 
     @State private var image: UIImage?
     @State private var phase: Phase = .loading
     @State private var isVideo = false
     @State private var player: AVPlayer?
+    @State private var isPlaying = false
 
     private enum Phase { case loading, loaded, missing }
 
@@ -82,9 +84,7 @@ private struct PhotoPage: View {
 
             switch phase {
             case .loaded:
-                if let player {
-                    VideoPlayer(player: player)
-                } else if let image {
+                if let image {
                     Color.black
                         .overlay {
                             Image(uiImage: image)
@@ -94,21 +94,35 @@ private struct PhotoPage: View {
                         .clipped()
                         .blur(radius: 20)
                         .opacity(0.8)
+                }
 
+                if let player {
+                    PlayerView(player: player)
+                        .onTapGesture {
+                            guard isPlaying else { return }
+                            player.pause()
+                            isPlaying = false
+                        }
+                } else if let image {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFit()
+                }
 
-                    if isVideo {
-                        Button {
+                if isVideo && !isPlaying {
+                    Button {
+                        if let player {
+                            player.play()
+                            isPlaying = true
+                        } else {
                             Task { await startPlayback() }
-                        } label: {
-                            Image(systemName: "play.circle.fill")
-                                .font(.system(size: 64))
-                                .symbolRenderingMode(.hierarchical)
-                                .foregroundStyle(.white)
-                                .shadow(radius: 4)
                         }
+                    } label: {
+                        Image(systemName: "play.circle.fill")
+                            .font(.system(size: 64))
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(.white)
+                            .shadow(radius: 4)
                     }
                 }
             case .loading:
@@ -120,12 +134,26 @@ private struct PhotoPage: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 16))
+        .onChange(of: isCurrent) { _, current in
+            if !current {
+                player?.pause()
+                player = nil
+                isPlaying = false
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
+            guard let item = notification.object as? AVPlayerItem,
+                  item == player?.currentItem else { return }
+            isPlaying = false
+            player?.seek(to: .zero)
+        }
         .task(id: assetID) {
             player?.pause()
             player = nil
             image = nil
             phase = .loading
             isVideo = false
+            isPlaying = false
             guard let asset = AlbumService.asset(for: assetID) else {
                 phase = .missing
                 return
@@ -144,6 +172,7 @@ private struct PhotoPage: View {
         let avPlayer = AVPlayer(playerItem: item)
         player = avPlayer
         avPlayer.play()
+        isPlaying = true
     }
 
     private func requestPlayerItem(for asset: PHAsset) async -> AVPlayerItem? {
@@ -155,5 +184,27 @@ private struct PhotoPage: View {
                 cont.resume(returning: item)
             }
         }
+    }
+}
+
+// MARK: - Lightweight AVPlayerLayer wrapper
+
+private struct PlayerView: UIViewRepresentable {
+    let player: AVPlayer
+
+    func makeUIView(context: Context) -> PlayerUIView {
+        let view = PlayerUIView()
+        view.playerLayer.player = player
+        view.playerLayer.videoGravity = .resizeAspect
+        return view
+    }
+
+    func updateUIView(_ uiView: PlayerUIView, context: Context) {
+        uiView.playerLayer.player = player
+    }
+
+    final class PlayerUIView: UIView {
+        override class var layerClass: AnyClass { AVPlayerLayer.self }
+        var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
     }
 }
