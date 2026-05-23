@@ -197,6 +197,11 @@ struct SortSessionView: View {
             .frame(maxWidth: .infinity)
             .frame(height: 20)
             .contentShape(Rectangle())
+            .onTapGesture(count: 2) {
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    photoHeight = 300
+                }
+            }
             .gesture(
                 DragGesture(coordinateSpace: .global)
                     .onChanged { value in
