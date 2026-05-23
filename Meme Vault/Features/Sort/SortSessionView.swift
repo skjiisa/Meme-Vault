@@ -21,12 +21,22 @@ struct SortSessionView: View {
     @State private var undoTimer: Task<Void, Never>?
     @State private var showingContextEditor = false
     @State private var columnCount = 3
+    @State private var photoHeight: CGFloat = 300
+    @State private var dragStartHeight: CGFloat?
     @State private var hasAppeared = false
     @State private var viewingAlbum: AlbumSheetItem?
+
+    private let minPhotoHeight: CGFloat = 120
+    private let maxPhotoHeight: CGFloat = 500
 
     private var columnCountKey: String {
         "albumGridColumns_\(context.uuid.uuidString)"
     }
+
+    private var photoHeightKey: String {
+        "photoHeight_\(context.uuid.uuidString)"
+    }
+
 
     var body: some View {
         Group {
@@ -65,6 +75,9 @@ struct SortSessionView: View {
         .onAppear {
             let stored = UserDefaults.standard.object(forKey: columnCountKey) as? Int
             columnCount = stored ?? 3
+            if let storedHeight = UserDefaults.standard.object(forKey: photoHeightKey) as? Double {
+                photoHeight = CGFloat(storedHeight)
+            }
             if hasAppeared {
                 Task { await vm?.refreshAfterReappear() }
             }
@@ -72,6 +85,9 @@ struct SortSessionView: View {
         }
         .onChange(of: columnCount) { _, newValue in
             UserDefaults.standard.set(newValue, forKey: columnCountKey)
+        }
+        .onChange(of: photoHeight) { _, newValue in
+            UserDefaults.standard.set(Double(newValue), forKey: photoHeightKey)
         }
     }
 
@@ -128,7 +144,10 @@ struct SortSessionView: View {
                     set: { id in if let id { vm.showAsset(id: id) } }
                 )
             )
-            .frame(height: 300)
+            .frame(height: photoHeight)
+
+            // Resize grabber
+            resizeGrabber
 
             // Queue strip
             QueuePreviewStrip(assetIDs: vm.queue, currentID: vm.currentAssetID) { id in
@@ -167,6 +186,29 @@ struct SortSessionView: View {
         } message: {
             Text("This item isn't in any of this context's destination albums. Skip it, or go back and select a destination.")
         }
+    }
+
+    // MARK: - Resize grabber
+
+    private var resizeGrabber: some View {
+        Capsule()
+            .fill(Color(.tertiaryLabel))
+            .frame(width: 36, height: 5)
+            .frame(maxWidth: .infinity)
+            .frame(height: 20)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(coordinateSpace: .global)
+                    .onChanged { value in
+                        if dragStartHeight == nil {
+                            dragStartHeight = photoHeight
+                        }
+                        photoHeight = min(maxPhotoHeight, max(minPhotoHeight, dragStartHeight! + value.translation.height))
+                    }
+                    .onEnded { _ in
+                        dragStartHeight = nil
+                    }
+            )
     }
 
     // MARK: - Album grid

@@ -103,6 +103,21 @@ private struct PhotoPage: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 16))
+        .contextMenu {
+            Button("Show in Photos", systemImage: "photo") {
+                openInPhotosApp(assetID: assetID)
+            }
+        } preview: {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 300, maxHeight: 400)
+            } else {
+                ProgressView()
+                    .frame(width: 200, height: 200)
+            }
+        }
         .task(id: assetID) {
             image = nil
             phase = .loading
@@ -114,6 +129,16 @@ private struct PhotoPage: View {
             guard !Task.isCancelled else { return }
             image = loaded
             phase = (loaded == nil) ? .missing : .loaded
+        }
+    }
+
+    private func openInPhotosApp(assetID: String) {
+        let encoded = assetID.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? assetID
+        guard let url = URL(string: "photos-redirect://asset?id=\(encoded)") else { return }
+        UIApplication.shared.open(url) { success in
+            if !success, let fallback = URL(string: "photos-redirect://") {
+                UIApplication.shared.open(fallback)
+            }
         }
     }
 }
