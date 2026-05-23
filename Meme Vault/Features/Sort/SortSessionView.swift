@@ -27,7 +27,16 @@ struct SortSessionView: View {
     @State private var wasInNotch = false
     @State private var hasAppeared = false
     @State private var viewingAlbum: AlbumSheetItem?
+    @State private var topSafeInset: CGFloat = 0
+    @State private var contentMaxY: CGFloat = 0
+    @State private var screenHeight: CGFloat = 0
     @Namespace private var thumbnailNamespace
+
+    // The bottom inset (home indicator) the album list extends under and must
+    // re-add as a content margin so its content rests above the indicator.
+    private var bottomSafeInset: CGFloat {
+        max(0, screenHeight - contentMaxY)
+    }
 
     private let minPhotoHeight: CGFloat = 120
     private let maxPhotoHeight: CGFloat = 500
@@ -52,6 +61,20 @@ struct SortSessionView: View {
                 ProgressView("Loading…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+        }
+        // The content area sits between the nav bar and the home indicator, so
+        // its global top/bottom offsets give the insets the grid and album list
+        // extend under and must re-add as content margins.
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+            topSafeInset = frame.minY
+            contentMaxY = frame.maxY
+        }
+        .background {
+            // Full-screen probe for the device height, used to derive the
+            // bottom inset (height − content bottom).
+            Color.clear
+                .ignoresSafeArea()
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { screenHeight = $0 }
         }
         .navigationTitle(context.name.isEmpty ? "Sort" : context.name)
         .navigationBarTitleDisplayMode(.inline)
@@ -146,13 +169,10 @@ struct SortSessionView: View {
     @ViewBuilder
     private func sortContent(vm: SortSessionViewModel) -> some View {
         VStack(spacing: 6) {
-            // Progress / selection header
-            HStack {
-                if vm.isBulkMode {
-                    Text("\(vm.bulkSelectedIDs.count) selected")
-                        .font(.caption.weight(.semibold))
-                    Spacer()
-                } else {
+            // Progress header — browse mode only. In bulk mode the selection
+            // count floats over the grid so the grid can reach the nav bar.
+            if !vm.isBulkMode {
+                HStack {
                     Text(vm.progressText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -163,21 +183,39 @@ struct SortSessionView: View {
                             .foregroundStyle(.green)
                     }
                 }
+                .padding(.horizontal)
             }
-            .padding(.horizontal)
 
             // Resizable media region — the browse card or the selection grid.
             // Both honor photoHeight, so the region keeps its size across a
             // bulk-mode toggle and the grabber always sits directly below it.
             if vm.isBulkMode {
-                QueueThumbnailsView(
-                    assetIDs: vm.queue,
-                    isBulkMode: true,
-                    currentID: vm.currentAssetID,
-                    selectedIDs: vm.bulkSelectedIDs,
-                    onTap: { vm.toggleBulkSelection($0) },
-                    namespace: thumbnailNamespace
-                )
+                // The grid extends up under the translucent nav bar; its
+                // ScrollView re-adds a content inset equal to the consumed
+                // safe area, so resting content stays below the bar while
+                // scrolling reveals it underneath. The selection count is a
+                // sibling in the ZStack (not inside the safe-area-ignoring
+                // grid), so it floats just below the bar.
+                ZStack(alignment: .topLeading) {
+                    QueueThumbnailsView(
+                        assetIDs: vm.queue,
+                        isBulkMode: true,
+                        currentID: vm.currentAssetID,
+                        selectedIDs: vm.bulkSelectedIDs,
+                        onTap: { vm.toggleBulkSelection($0) },
+                        namespace: thumbnailNamespace
+                    )
+                    .contentMargins(.top, topSafeInset)
+                    .ignoresSafeArea(.container, edges: .top)
+
+                    Text("\(vm.bulkSelectedIDs.count) selected")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .padding(.top, 8)
+                        .padding(.leading, 8)
+                }
                 .frame(height: photoHeight)
             } else {
                 PhotoCardView(
@@ -214,7 +252,10 @@ struct SortSessionView: View {
             // Album list
             albumList(vm: vm)
         }
-        .padding(.vertical, 4)
+        // No bottom padding: the album list extends to the screen edge and its
+        // content inset respects the home indicator. No top padding in bulk
+        // mode so the grid sits flush against the nav bar.
+        .padding(.top, vm.isBulkMode ? 0 : 4)
         .overlay(alignment: .bottom) {
             if showUndoToast, let action = vm.lastAction {
                 undoToast(action: action, vm: vm)
@@ -430,6 +471,10 @@ struct SortSessionView: View {
             .animation(.easeInOut(duration: 0.25), value: vm.extraAlbumIDs)
             .animation(.easeInOut(duration: 0.25), value: vm.isMultiSelectActive)
         }
+        // Extend under the home indicator, then re-add it as a content margin
+        // so the resting content and scroll indicator stay within the safe area.
+        .contentMargins(.bottom, bottomSafeInset)
+        .ignoresSafeArea(.container, edges: .bottom)
     }
 
     // MARK: - Control bar
