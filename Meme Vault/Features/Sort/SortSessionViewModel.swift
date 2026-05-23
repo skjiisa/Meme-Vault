@@ -581,6 +581,13 @@ final class SortSessionViewModel {
     func exitBulkMode() {
         isBulkMode = false
         bulkSelectedIDs = []
+        if isMultiSelectActive {
+            multiSelectAdds = []
+            multiSelectRemoves = []
+            isMultiSelectActive = false
+            extraAlbumIDs = []
+            extraAlbumInfos = []
+        }
         refreshCurrent()
     }
 

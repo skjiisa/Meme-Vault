@@ -42,8 +42,26 @@ struct SortSessionView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button("Edit Context", systemImage: "slider.horizontal.3") {
-                    showingContextEditor = true
+                HStack(spacing: 12) {
+                    if let vm {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                if vm.isBulkMode {
+                                    vm.exitBulkMode()
+                                } else {
+                                    vm.enterBulkMode()
+                                }
+                            }
+                        } label: {
+                            Image(systemName: vm.isBulkMode
+                                   ? "square.grid.2x2.fill"
+                                   : "square.grid.2x2")
+                                .foregroundStyle(vm.isBulkMode ? Color.accentColor : Color.primary)
+                        }
+                    }
+                    Button("Edit Context", systemImage: "slider.horizontal.3") {
+                        showingContextEditor = true
+                    }
                 }
             }
         }
@@ -404,22 +422,6 @@ struct SortSessionView: View {
                 Image(systemName: vm.isMultiSelectActive ? "rectangle.stack.fill" : "rectangle.stack")
                     .frame(width: 44, height: 36)
                     .foregroundStyle(vm.isMultiSelectActive ? Color.accentColor : Color.primary)
-            }
-
-            Button {
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    if vm.isBulkMode {
-                        vm.exitBulkMode()
-                    } else {
-                        vm.enterBulkMode()
-                    }
-                }
-            } label: {
-                Image(systemName: vm.isBulkMode
-                       ? "square.grid.2x2.fill"
-                       : "square.grid.2x2")
-                    .frame(width: 44, height: 36)
-                    .foregroundStyle(vm.isBulkMode ? Color.accentColor : Color.primary)
             }
         }
         .padding(.horizontal)
