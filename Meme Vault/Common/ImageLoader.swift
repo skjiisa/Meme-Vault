@@ -102,6 +102,53 @@ final class ImageLoader {
         }
     }
 
+    /// Progressive thumbnail delivery for grid and strip cells. Yields the fast
+    /// (possibly degraded) result first so a cell populates instantly, then the
+    /// sharp full-quality result when PhotoKit finishes decoding it. Unlike
+    /// `loadThumbnail`, this does not get stuck on the degraded pass.
+    ///
+    /// Returns the stream plus a `cancel` handle. Callers should drive the stream
+    /// inside `withTaskCancellationHandler` and call `cancel` from `onCancel`: an
+    /// `AsyncStream` does not finish on its own when the consuming task is
+    /// cancelled, so without this the PhotoKit request would run to completion
+    /// even after the cell scrolled away. Cancelling finishes the stream, which
+    /// (via `onTermination`) cancels the request — so fast scrolling stops piling
+    /// up orphaned full-resolution decodes that would otherwise stutter it.
+    func thumbnailStream(
+        for asset: PHAsset,
+        targetSize: CGSize
+    ) -> (stream: AsyncStream<UIImage>, cancel: @Sendable () -> Void) {
+        final class Holder: @unchecked Sendable {
+            nonisolated(unsafe) var continuation: AsyncStream<UIImage>.Continuation?
+        }
+        let holder = Holder()
+
+        let stream = AsyncStream<UIImage> { continuation in
+            holder.continuation = continuation
+            let id = manager.requestImage(
+                for: asset,
+                targetSize: targetSize,
+                contentMode: .aspectFill,
+                options: thumbnailOptions
+            ) { image, info in
+                if let image { continuation.yield(image) }
+                let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                let isCancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
+                let hasError = info?[PHImageErrorKey] != nil
+                // A non-degraded image is the final, sharp result; cancellation
+                // or error means nothing more is coming. Either way we're done.
+                if !isDegraded || isCancelled || hasError {
+                    continuation.finish()
+                }
+            }
+            continuation.onTermination = { _ in
+                Task { @MainActor in ImageLoader.shared.manager.cancelImageRequest(id) }
+            }
+        }
+
+        return (stream, { holder.continuation?.finish() })
+    }
+
     // MARK: - Prefetch window
 
     /// Declare the exact set of asset IDs that should be kept warm right now.

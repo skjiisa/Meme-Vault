@@ -55,7 +55,7 @@ struct QueueThumbnailsView: View {
                     LazyHStack(spacing: 6) {
                         ForEach(assetIDs, id: \.self) { id in
                             Button { onTap(id) } label: {
-                                QueueThumbnail(assetID: id)
+                                QueueThumbnail(assetID: id, displayPointSize: 36)
                                     .frame(width: 36, height: 36)
                                     .overlay {
                                         if id == currentID {
@@ -94,7 +94,18 @@ struct QueueThumbnailsView: View {
 
 struct QueueThumbnail: View {
     let assetID: String
+    /// Rendered edge length in points; the PhotoKit request is sized to this ×
+    /// the display scale so the thumbnail is sharp and we don't over-fetch (the
+    /// 36pt strip previously decoded a 200px image per cell).
+    var displayPointSize: CGFloat = 80
+
+    @Environment(\.displayScale) private var displayScale
     @State private var thumbnail: UIImage?
+
+    private var targetSize: CGSize {
+        let side = displayPointSize * displayScale
+        return CGSize(width: side, height: side)
+    }
 
     var body: some View {
         Color(.tertiarySystemFill)
@@ -109,10 +120,12 @@ struct QueueThumbnail: View {
             .clipShape(.rect(cornerRadius: 4))
             .task(id: assetID) {
                 guard let asset = AlbumService.asset(for: assetID) else { return }
-                thumbnail = await ImageLoader.shared.loadThumbnail(
-                    for: asset,
-                    targetSize: CGSize(width: 200, height: 200)
-                )
+                let (stream, cancel) = ImageLoader.shared.thumbnailStream(for: asset, targetSize: targetSize)
+                await withTaskCancellationHandler {
+                    for await image in stream { thumbnail = image }
+                } onCancel: {
+                    cancel()
+                }
             }
     }
 }
