@@ -27,6 +27,7 @@ struct SortSessionView: View {
     @State private var wasInNotch = false
     @State private var hasAppeared = false
     @State private var viewingAlbum: AlbumSheetItem?
+    @Namespace private var thumbnailNamespace
 
     private let minPhotoHeight: CGFloat = 120
     private let maxPhotoHeight: CGFloat = 500
@@ -56,8 +57,26 @@ struct SortSessionView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button("Edit Context", systemImage: "slider.horizontal.3") {
-                    showingContextEditor = true
+                HStack(spacing: 12) {
+                    if let vm {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                if vm.isBulkMode {
+                                    vm.exitBulkMode()
+                                } else {
+                                    vm.enterBulkMode()
+                                }
+                            }
+                        } label: {
+                            Image(systemName: vm.isBulkMode
+                                   ? "square.grid.2x2.fill"
+                                   : "square.grid.2x2")
+                                .foregroundStyle(vm.isBulkMode ? Color.accentColor : Color.primary)
+                        }
+                    }
+                    Button("Edit Context", systemImage: "slider.horizontal.3") {
+                        showingContextEditor = true
+                    }
                 }
             }
         }
@@ -103,7 +122,7 @@ struct SortSessionView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if vm.queue.isEmpty {
             allDoneView
-        } else if vm.currentAsset != nil {
+        } else if vm.currentAsset != nil || vm.isBulkMode {
             sortContent(vm: vm)
         } else {
             ProgressView()
@@ -127,36 +146,66 @@ struct SortSessionView: View {
     @ViewBuilder
     private func sortContent(vm: SortSessionViewModel) -> some View {
         VStack(spacing: 6) {
-            // Progress
+            // Progress / selection header
             HStack {
-                Text(vm.progressText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if vm.isSatisfied {
-                    Label("Sorted", systemImage: "checkmark.circle.fill")
+                if vm.isBulkMode {
+                    Text("\(vm.bulkSelectedIDs.count) selected")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.green)
+                    Spacer()
+                } else {
+                    Text(vm.progressText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if vm.isSatisfied {
+                        Label("Sorted", systemImage: "checkmark.circle.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.green)
+                    }
                 }
             }
             .padding(.horizontal)
 
-            // Photo carousel
-            PhotoCardView(
-                assetIDs: vm.queue,
-                currentID: Binding(
-                    get: { vm.currentAssetID },
-                    set: { id in if let id { vm.showAsset(id: id) } }
+            // Resizable media region — the browse card or the selection grid.
+            // Both honor photoHeight, so the region keeps its size across a
+            // bulk-mode toggle and the grabber always sits directly below it.
+            if vm.isBulkMode {
+                QueueThumbnailsView(
+                    assetIDs: vm.queue,
+                    isBulkMode: true,
+                    currentID: vm.currentAssetID,
+                    selectedIDs: vm.bulkSelectedIDs,
+                    onTap: { vm.toggleBulkSelection($0) },
+                    namespace: thumbnailNamespace
                 )
-            )
-            .frame(height: photoHeight)
+                .frame(height: photoHeight)
+            } else {
+                PhotoCardView(
+                    assetIDs: vm.queue,
+                    currentID: Binding(
+                        get: { vm.currentAssetID },
+                        set: { id in if let id { vm.showAsset(id: id) } }
+                    )
+                )
+                .frame(height: photoHeight)
+                .transition(.blurReplace)
+            }
 
-            // Resize grabber
-            resizeGrabber
+            // Resize grabber — drives photoHeight in both modes. The snap-to-
+            // default notch only applies in browse mode; the grid has no
+            // meaningful default height, so there it tracks the finger freely.
+            resizeGrabber(notchEnabled: !vm.isBulkMode)
 
-            // Queue strip
-            QueuePreviewStrip(assetIDs: vm.queue, currentID: vm.currentAssetID) { id in
-                vm.showAsset(id: id)
+            // Browse mode keeps the horizontal queue strip below the grabber.
+            if !vm.isBulkMode {
+                QueueThumbnailsView(
+                    assetIDs: vm.queue,
+                    isBulkMode: false,
+                    currentID: vm.currentAssetID,
+                    selectedIDs: vm.bulkSelectedIDs,
+                    onTap: { vm.showAsset(id: $0) },
+                    namespace: thumbnailNamespace
+                )
             }
 
             // Control bar
@@ -195,7 +244,7 @@ struct SortSessionView: View {
 
     // MARK: - Resize grabber
 
-    private var resizeGrabber: some View {
+    private func resizeGrabber(notchEnabled: Bool) -> some View {
         Capsule()
             .fill(Color(.tertiaryLabel))
             .frame(width: 36, height: 5)
@@ -207,11 +256,11 @@ struct SortSessionView: View {
                     .onChanged { value in
                         if dragStartHeight == nil {
                             dragStartHeight = photoHeight
-                            wasInNotch = abs(photoHeight - defaultPhotoHeight) < 1
+                            wasInNotch = notchEnabled && abs(photoHeight - defaultPhotoHeight) < 1
                         }
                         let raw = dragStartHeight! + value.translation.height
                         let clamped = min(maxPhotoHeight, max(minPhotoHeight, raw))
-                        let inNotch = abs(clamped - defaultPhotoHeight) <= notchRadius
+                        let inNotch = notchEnabled && abs(clamped - defaultPhotoHeight) <= notchRadius
                         let target = inNotch ? applyNotch(clamped) : clamped
 
                         if !inNotch, wasInNotch {
@@ -237,7 +286,7 @@ struct SortSessionView: View {
                         guard let start = dragStartHeight else { return }
                         let raw = start + value.translation.height
                         let clamped = min(maxPhotoHeight, max(minPhotoHeight, raw))
-                        if abs(clamped - defaultPhotoHeight) <= notchRadius {
+                        if notchEnabled, abs(clamped - defaultPhotoHeight) <= notchRadius {
                             withAnimation(releaseAnimation) {
                                 photoHeight = defaultPhotoHeight
                             }
@@ -282,25 +331,35 @@ struct SortSessionView: View {
         let infos = vm.albumInfos
         let extras = vm.extraAlbumInfos
         let memberIDs = Set(vm.memberships.filter(\.isMember).map(\.id))
+        let bulkDirect = vm.isBulkMode && !vm.isMultiSelectActive
+        let bulkDisabled = bulkDirect && vm.bulkSelectedIDs.isEmpty
         ScrollView {
             LazyVGrid(columns: albumColumns, spacing: 8) {
                 ForEach(infos, id: \.id) { info in
                     let isMember = memberIDs.contains(info.id)
                     Button {
-                        Task {
-                            await vm.toggleAlbum(info.id)
-                            if case .sorted = vm.lastAction { showToast() }
+                        if bulkDirect {
+                            Task {
+                                await vm.bulkSortToAlbum(info.id)
+                                if case .bulkSorted = vm.lastAction { showToast() }
+                            }
+                        } else {
+                            Task {
+                                await vm.toggleAlbum(info.id)
+                                if case .sorted = vm.lastAction { showToast() }
+                            }
                         }
                     } label: {
                         AlbumGridCell(
                             albumID: info.id,
                             title: info.title,
                             count: info.assetCount,
-                            isMember: isMember,
+                            isMember: bulkDirect ? false : isMember,
                             refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
                         )
                     }
                     .buttonStyle(.plain)
+                    .disabled(bulkDisabled)
                     .contextMenu {
                         Button("View Contents", systemImage: "photo.on.rectangle") {
                             viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
@@ -310,23 +369,29 @@ struct SortSessionView: View {
                 ForEach(vm.pinnedAlbumInfos, id: \.id) { info in
                     let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
                     Button {
-                        if !vm.isMultiSelectActive {
-                            vm.activateMultiSelect()
-                        }
-                        Task {
-                            await vm.toggleAlbum(info.id)
+                        if bulkDirect {
+                            Task {
+                                await vm.bulkSortToAlbum(info.id)
+                                if case .bulkSorted = vm.lastAction { showToast() }
+                            }
+                        } else {
+                            if !vm.isMultiSelectActive {
+                                vm.activateMultiSelect()
+                            }
+                            Task { await vm.toggleAlbum(info.id) }
                         }
                     } label: {
                         AlbumGridCell(
                             albumID: info.id,
                             title: info.title,
                             count: info.assetCount,
-                            isMember: isMember,
+                            isMember: bulkDirect ? false : isMember,
                             refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
                         )
                         .opacity(isMember ? 1 : 0.6)
                     }
                     .buttonStyle(.plain)
+                    .disabled(bulkDisabled)
                     .contextMenu {
                         Button("View Contents", systemImage: "photo.on.rectangle") {
                             viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
@@ -370,7 +435,8 @@ struct SortSessionView: View {
     // MARK: - Control bar
 
     private func controlBar(vm: SortSessionViewModel) -> some View {
-        HStack {
+        let bulkNoSelection = vm.isBulkMode && vm.bulkSelectedIDs.isEmpty
+        return HStack {
             Button {
                 Task { await vm.undo(); showUndoToast = false }
             } label: {
@@ -382,31 +448,46 @@ struct SortSessionView: View {
             Spacer()
 
             Button {
-                Task { await vm.queueDelete(); showToast() }
+                if vm.isBulkMode {
+                    Task { await vm.bulkQueueDelete(); showToast() }
+                } else {
+                    Task { await vm.queueDelete(); showToast() }
+                }
             } label: {
                 Image(systemName: "trash")
                     .frame(width: 44, height: 36)
                     .foregroundStyle(.red)
             }
+            .disabled(bulkNoSelection)
 
             Spacer()
 
             Button {
-                Task { await vm.skip(); showToast() }
+                if vm.isBulkMode {
+                    Task { await vm.bulkSkip(); showToast() }
+                } else {
+                    Task { await vm.skip(); showToast() }
+                }
             } label: {
                 Image(systemName: "arrow.right.to.line")
                     .frame(width: 44, height: 36)
             }
+            .disabled(bulkNoSelection)
 
             Spacer()
 
             Button {
-                Task { await vm.toggleFavorite() }
+                if vm.isBulkMode {
+                    Task { await vm.bulkToggleFavorite() }
+                } else {
+                    Task { await vm.toggleFavorite() }
+                }
             } label: {
                 Image(systemName: vm.isFavorite ? "heart.fill" : "heart")
                     .frame(width: 44, height: 36)
                     .foregroundStyle(vm.isFavorite ? .yellow : .secondary)
             }
+            .disabled(bulkNoSelection)
 
             Spacer()
 
@@ -437,6 +518,7 @@ struct SortSessionView: View {
                     Task {
                         await vm.deactivateMultiSelect()
                         if case .sortedMulti = vm.lastAction { showToast() }
+                        if case .bulkSorted = vm.lastAction { showToast() }
                     }
                 } else {
                     vm.activateMultiSelect()
@@ -470,6 +552,12 @@ struct SortSessionView: View {
             case .sortedMulti: return "Sorted"
             case .skipped: return "Skipped"
             case .queuedDelete: return "Queued for deletion"
+            case .bulkSorted(_, _, let removed):
+                return "Sorted \(removed.count) photo\(removed.count == 1 ? "" : "s")"
+            case .bulkSkipped(let ids):
+                return "Skipped \(ids.count) photo\(ids.count == 1 ? "" : "s")"
+            case .bulkDeleted(let ids):
+                return "Queued \(ids.count) for deletion"
             }
         }()
         return HStack {
