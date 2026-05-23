@@ -166,7 +166,20 @@ struct SortSessionView: View {
             }
             .padding(.horizontal)
 
-            if !vm.isBulkMode {
+            // Resizable media region — the browse card or the selection grid.
+            // Both honor photoHeight, so the region keeps its size across a
+            // bulk-mode toggle and the grabber always sits directly below it.
+            if vm.isBulkMode {
+                QueueThumbnailsView(
+                    assetIDs: vm.queue,
+                    isBulkMode: true,
+                    currentID: vm.currentAssetID,
+                    selectedIDs: vm.bulkSelectedIDs,
+                    onTap: { vm.toggleBulkSelection($0) },
+                    namespace: thumbnailNamespace
+                )
+                .frame(height: photoHeight)
+            } else {
                 PhotoCardView(
                     assetIDs: vm.queue,
                     currentID: Binding(
@@ -176,26 +189,22 @@ struct SortSessionView: View {
                 )
                 .frame(height: photoHeight)
                 .transition(.blurReplace)
-
-                // Resize grabber — only meaningful when the photo card is shown
-                resizeGrabber
-                    .transition(.blurReplace)
             }
 
-            QueueThumbnailsView(
-                assetIDs: vm.queue,
-                isBulkMode: vm.isBulkMode,
-                currentID: vm.currentAssetID,
-                selectedIDs: vm.bulkSelectedIDs,
-                onTap: { id in
-                    if vm.isBulkMode {
-                        vm.toggleBulkSelection(id)
-                    } else {
-                        vm.showAsset(id: id)
-                    }
-                },
-                namespace: thumbnailNamespace
-            )
+            // Resize grabber — drives photoHeight in both browse and grid modes.
+            resizeGrabber
+
+            // Browse mode keeps the horizontal queue strip below the grabber.
+            if !vm.isBulkMode {
+                QueueThumbnailsView(
+                    assetIDs: vm.queue,
+                    isBulkMode: false,
+                    currentID: vm.currentAssetID,
+                    selectedIDs: vm.bulkSelectedIDs,
+                    onTap: { vm.showAsset(id: $0) },
+                    namespace: thumbnailNamespace
+                )
+            }
 
             // Control bar
             controlBar(vm: vm)
