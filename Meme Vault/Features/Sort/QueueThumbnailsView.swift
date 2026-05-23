@@ -46,6 +46,7 @@ struct QueueThumbnailsView: View {
                     }
                 }
                 .padding(.horizontal)
+                .padding(.vertical, 2)
                 .animation(.easeInOut(duration: 0.3), value: assetIDs)
             }
         } else if !assetIDs.isEmpty {

@@ -600,14 +600,6 @@ final class SortSessionViewModel {
         Haptics.tap()
     }
 
-    func selectAllBulk() {
-        bulkSelectedIDs = Set(queue)
-    }
-
-    func clearBulkSelection() {
-        bulkSelectedIDs = []
-    }
-
     func bulkSortToAlbum(_ albumID: String) async {
         let selected = bulkSelectedIDs
         guard !selected.isEmpty else { return }

@@ -131,15 +131,6 @@ struct SortSessionView: View {
                     Text("\(vm.bulkSelectedIDs.count) selected")
                         .font(.caption.weight(.semibold))
                     Spacer()
-                    Button(vm.bulkSelectedIDs.count == vm.queue.count
-                           ? "Deselect All" : "Select All") {
-                        if vm.bulkSelectedIDs.count == vm.queue.count {
-                            vm.clearBulkSelection()
-                        } else {
-                            vm.selectAllBulk()
-                        }
-                    }
-                    .font(.caption)
                 } else {
                     Text(vm.progressText)
                         .font(.caption)
