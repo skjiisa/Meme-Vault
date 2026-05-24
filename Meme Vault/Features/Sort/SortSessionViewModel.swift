@@ -127,9 +127,19 @@ final class SortSessionViewModel {
             refreshDefaultAlbums()
         }
 
-        let pool = AssetSource.queue(for: context)
+        // Read the SwiftData-backed inputs on the main actor, then run the
+        // (potentially huge) pool enumeration off it so it doesn't freeze the UI.
+        let sourceKind = context.sourceKind
+        let sourceAlbumLocalID = context.sourceAlbumLocalID
+        let pool = await Task.detached(priority: .userInitiated) {
+            AssetSource.queue(sourceKind: sourceKind, sourceAlbumLocalID: sourceAlbumLocalID)
+        }.value
 
         totalAssetsInPool = pool.count
+
+        // Warm the membership cache off the main actor before the satisfaction
+        // loop below, so each album isn't fetched synchronously on first touch.
+        await evaluator.prewarm(albumIDs: context.albumLocalIDs + context.pinnedAlbumLocalIDs)
 
         let skipIDs = Set(context.skips.map(\.assetLocalID))
         let deleteIDs = Set(context.pendingDeletes.map(\.assetLocalID))
@@ -385,11 +395,17 @@ final class SortSessionViewModel {
         }
     }
 
-    func activateMultiSelect() {
+    func activateMultiSelect() async {
+        // Flip the mode immediately for instant UI feedback; the non-context
+        // album list populates a beat later once the (off-main) fetch returns.
         isMultiSelectActive = true
         let contextIDs = Set(context.albumLocalIDs)
         let pinnedIDs = Set(context.pinnedAlbumLocalIDs)
-        let allAlbums = AlbumService.listUserAlbums()
+        let allAlbums = await Task.detached(priority: .userInitiated) {
+            AlbumService.listUserAlbums()
+        }.value
+        // Bail if multi-select was toggled back off while we were fetching.
+        guard isMultiSelectActive else { return }
         let nonContext = allAlbums.filter {
             !contextIDs.contains($0.id) && !pinnedIDs.contains($0.id)
         }
@@ -946,9 +962,15 @@ final class SortSessionViewModel {
             refreshDefaultAlbumsLight()
         }
 
-        let pool = AssetSource.queue(for: context)
+        let sourceKind = context.sourceKind
+        let sourceAlbumLocalID = context.sourceAlbumLocalID
+        let pool = await Task.detached(priority: .userInitiated) {
+            AssetSource.queue(sourceKind: sourceKind, sourceAlbumLocalID: sourceAlbumLocalID)
+        }.value
 
         totalAssetsInPool = pool.count
+
+        await evaluator.prewarm(albumIDs: context.albumLocalIDs + context.pinnedAlbumLocalIDs)
 
         let skipIDs = Set(context.skips.map(\.assetLocalID))
         let deleteIDs = Set(context.pendingDeletes.map(\.assetLocalID))

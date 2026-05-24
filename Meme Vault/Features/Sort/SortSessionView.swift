@@ -15,25 +15,16 @@ struct SortSessionView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(PhotoLibrary.self) private var library
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var vm: SortSessionViewModel?
     @State private var showUndoToast = false
     @State private var undoTimer: Task<Void, Never>?
     @State private var showingContextEditor = false
     @State private var columnCount = 3
-    @State private var photoHeight: CGFloat = 300
-    @State private var dragStartHeight: CGFloat?
-    @State private var wasInNotch = false
     @State private var hasAppeared = false
-    @State private var viewingAlbum: AlbumSheetItem?
+    @State private var topSafeInset: CGFloat = 0
+    @State private var bottomSafeInset: CGFloat = 0
     @Namespace private var thumbnailNamespace
-
-    private let minPhotoHeight: CGFloat = 120
-    private let maxPhotoHeight: CGFloat = 500
-    private let defaultPhotoHeight: CGFloat = 300
-    private let notchRadius: CGFloat = 30
-    private let notchDamping: CGFloat = 0.25
 
     private var columnCountKey: String {
         "albumGridColumns_\(context.uuid.uuidString)"
@@ -53,6 +44,15 @@ struct SortSessionView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        // The content sits between the nav bar and the home indicator; the grid
+        // and album list extend under those edges and re-add these insets as
+        // content margins. The top inset is the content's global offset (the
+        // nav bar isn't surfaced as a safe-area inset on the content). The
+        // bottom inset is read from the safe area directly so it stays correct
+        // even though the album list extends under the home indicator — reading
+        // the content's own maxY would just report the extended (screen) edge.
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { topSafeInset = $0 }
+        .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.bottom } action: { bottomSafeInset = $0 }
         .navigationTitle(context.name.isEmpty ? "Sort" : context.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -99,9 +99,6 @@ struct SortSessionView: View {
         .onAppear {
             let stored = UserDefaults.standard.object(forKey: columnCountKey) as? Int
             columnCount = stored ?? 3
-            if let storedHeight = UserDefaults.standard.object(forKey: photoHeightKey) as? Double {
-                photoHeight = CGFloat(storedHeight)
-            }
             if hasAppeared {
                 Task { await vm?.refreshAfterReappear() }
             }
@@ -109,9 +106,6 @@ struct SortSessionView: View {
         }
         .onChange(of: columnCount) { _, newValue in
             UserDefaults.standard.set(newValue, forKey: columnCountKey)
-        }
-        .onChange(of: photoHeight) { _, newValue in
-            UserDefaults.standard.set(Double(newValue), forKey: photoHeightKey)
         }
     }
 
@@ -146,13 +140,10 @@ struct SortSessionView: View {
     @ViewBuilder
     private func sortContent(vm: SortSessionViewModel) -> some View {
         VStack(spacing: 6) {
-            // Progress / selection header
-            HStack {
-                if vm.isBulkMode {
-                    Text("\(vm.bulkSelectedIDs.count) selected")
-                        .font(.caption.weight(.semibold))
-                    Spacer()
-                } else {
+            // Progress header — browse mode only. In bulk mode the selection
+            // count floats over the grid so the grid can reach the nav bar.
+            if !vm.isBulkMode {
+                HStack {
                     Text(vm.progressText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -163,21 +154,182 @@ struct SortSessionView: View {
                             .foregroundStyle(.green)
                     }
                 }
+                .padding(.horizontal)
             }
-            .padding(.horizontal)
 
-            // Resizable media region — the browse card or the selection grid.
-            // Both honor photoHeight, so the region keeps its size across a
-            // bulk-mode toggle and the grabber always sits directly below it.
-            if vm.isBulkMode {
+            // Resizable media region (browse card or selection grid) plus its
+            // resize grabber, extracted into a child view that owns photoHeight.
+            // Dragging the grabber then re-evaluates only that subtree, leaving
+            // the album grid, control bar, and queue strip — siblings here —
+            // out of the per-frame invalidation scope.
+            MediaRegionView(
+                vm: vm,
+                namespace: thumbnailNamespace,
+                topSafeInset: topSafeInset,
+                photoHeightKey: photoHeightKey
+            )
+
+            // Browse mode keeps the horizontal queue strip below the grabber.
+            if !vm.isBulkMode {
                 QueueThumbnailsView(
                     assetIDs: vm.queue,
-                    isBulkMode: true,
+                    isBulkMode: false,
                     currentID: vm.currentAssetID,
                     selectedIDs: vm.bulkSelectedIDs,
-                    onTap: { vm.toggleBulkSelection($0) },
+                    onTap: { vm.showAsset(id: $0) },
                     namespace: thumbnailNamespace
                 )
+            }
+
+            // Control bar and album grid are extracted into their own views so
+            // their observation is scoped: a favorite toggle (read only by the
+            // control bar) or a column change no longer re-evaluates the
+            // carousel or progress header, and the album grid diffs on its own.
+            ControlBarView(
+                vm: vm,
+                columnCount: $columnCount,
+                onToast: showToast,
+                onHideToast: { showUndoToast = false }
+            )
+
+            AlbumListView(
+                vm: vm,
+                columnCount: columnCount,
+                bottomSafeInset: bottomSafeInset,
+                onToast: showToast
+            )
+        }
+        // No bottom padding: the album list extends to the screen edge and its
+        // content inset respects the home indicator. No top padding in bulk
+        // mode so the grid sits flush against the nav bar.
+        .padding(.top, vm.isBulkMode ? 0 : 4)
+        .overlay(alignment: .bottom) {
+            if showUndoToast, let action = vm.lastAction {
+                undoToast(action: action, vm: vm)
+                    .padding(.bottom, 16)
+            }
+        }
+        .alert(
+            "No Destination Album",
+            isPresented: Binding(
+                get: { vm.showExtraOnlyAlert },
+                set: { vm.showExtraOnlyAlert = $0 }
+            )
+        ) {
+            Button("Skip Item") {
+                Task { await vm.skipFromExtraOnlyAlert() }
+            }
+            Button("Select Destination", role: .cancel) {
+                vm.dismissExtraOnlyAlert()
+            }
+        } message: {
+            Text("This item isn't in any of this context's destination albums. Skip it, or go back and select a destination.")
+        }
+    }
+
+    // MARK: - Undo toast
+
+    private func showToast() {
+        showUndoToast = true
+        undoTimer?.cancel()
+        undoTimer = Task {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            if !Task.isCancelled {
+                showUndoToast = false
+            }
+        }
+    }
+
+    private func undoToast(action: SortSessionViewModel.SortAction, vm: SortSessionViewModel) -> some View {
+        let label: String = {
+            switch action {
+            case .sorted: return "Sorted"
+            case .sortedMulti: return "Sorted"
+            case .skipped: return "Skipped"
+            case .queuedDelete: return "Queued for deletion"
+            case .bulkSorted(_, _, let removed):
+                return "Sorted \(removed.count) photo\(removed.count == 1 ? "" : "s")"
+            case .bulkSkipped(let ids):
+                return "Skipped \(ids.count) photo\(ids.count == 1 ? "" : "s")"
+            case .bulkDeleted(let ids):
+                return "Queued \(ids.count) for deletion"
+            }
+        }()
+        return HStack {
+            Text(label)
+            Spacer()
+            Button("Undo") {
+                Task {
+                    await vm.undo()
+                    showUndoToast = false
+                }
+            }
+            .bold()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial, in: Capsule())
+        .padding(.horizontal, 24)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+}
+
+// MARK: - Media region
+
+/// The resizable media region — the browse card or the bulk-selection grid —
+/// plus the resize grabber that drives its height. `photoHeight` lives here
+/// rather than in `SortSessionView` so a resize drag re-evaluates only this
+/// subtree; the album grid, control bar, and queue strip are siblings in the
+/// parent and stay out of the per-frame invalidation scope. Identity is stable
+/// across a bulk-mode toggle (the parent always builds this view in the same
+/// slot), so the region keeps its size when switching modes.
+private struct MediaRegionView: View {
+    let vm: SortSessionViewModel
+    let namespace: Namespace.ID
+    let topSafeInset: CGFloat
+    let photoHeightKey: String
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    @State private var photoHeight: CGFloat = 300
+    @State private var dragStartHeight: CGFloat?
+    @State private var wasInNotch = false
+
+    private let minPhotoHeight: CGFloat = 120
+    private let maxPhotoHeight: CGFloat = 500
+    private let defaultPhotoHeight: CGFloat = 300
+    private let notchRadius: CGFloat = 30
+    private let notchDamping: CGFloat = 0.25
+
+    var body: some View {
+        VStack(spacing: 6) {
+            if vm.isBulkMode {
+                // The grid extends up under the translucent nav bar; its
+                // ScrollView re-adds a content inset equal to the consumed
+                // safe area, so resting content stays below the bar while
+                // scrolling reveals it underneath. The selection count is a
+                // sibling in the ZStack (not inside the safe-area-ignoring
+                // grid), so it floats just below the bar.
+                ZStack(alignment: .topLeading) {
+                    QueueThumbnailsView(
+                        assetIDs: vm.queue,
+                        isBulkMode: true,
+                        currentID: vm.currentAssetID,
+                        selectedIDs: vm.bulkSelectedIDs,
+                        onTap: { vm.toggleBulkSelection($0) },
+                        namespace: namespace
+                    )
+                    .contentMargins(.top, topSafeInset)
+                    .ignoresSafeArea(.container, edges: .top)
+
+                    Text("\(vm.bulkSelectedIDs.count) selected")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .padding(.top, 8)
+                        .padding(.leading, 8)
+                }
                 .frame(height: photoHeight)
             } else {
                 PhotoCardView(
@@ -195,50 +347,14 @@ struct SortSessionView: View {
             // default notch only applies in browse mode; the grid has no
             // meaningful default height, so there it tracks the finger freely.
             resizeGrabber(notchEnabled: !vm.isBulkMode)
-
-            // Browse mode keeps the horizontal queue strip below the grabber.
-            if !vm.isBulkMode {
-                QueueThumbnailsView(
-                    assetIDs: vm.queue,
-                    isBulkMode: false,
-                    currentID: vm.currentAssetID,
-                    selectedIDs: vm.bulkSelectedIDs,
-                    onTap: { vm.showAsset(id: $0) },
-                    namespace: thumbnailNamespace
-                )
-            }
-
-            // Control bar
-            controlBar(vm: vm)
-
-            // Album list
-            albumList(vm: vm)
         }
-        .padding(.vertical, 4)
-        .overlay(alignment: .bottom) {
-            if showUndoToast, let action = vm.lastAction {
-                undoToast(action: action, vm: vm)
-                    .padding(.bottom, 16)
+        .onAppear {
+            if let stored = UserDefaults.standard.object(forKey: photoHeightKey) as? Double {
+                photoHeight = CGFloat(stored)
             }
         }
-        .sheet(item: $viewingAlbum) { album in
-            AlbumContentsView(album: album)
-        }
-        .alert(
-            "No Destination Album",
-            isPresented: Binding(
-                get: { vm.showExtraOnlyAlert },
-                set: { vm.showExtraOnlyAlert = $0 }
-            )
-        ) {
-            Button("Skip Item") {
-                Task { await vm.skipFromExtraOnlyAlert() }
-            }
-            Button("Select Destination", role: .cancel) {
-                vm.dismissExtraOnlyAlert()
-            }
-        } message: {
-            Text("This item isn't in any of this context's destination albums. Skip it, or go back and select a destination.")
+        .onChange(of: photoHeight) { _, newValue in
+            UserDefaults.standard.set(Double(newValue), forKey: photoHeightKey)
         }
     }
 
@@ -319,126 +435,25 @@ struct SortSessionView: View {
         let delta = rawHeight - defaultPhotoHeight
         return defaultPhotoHeight + delta * notchDamping
     }
+}
 
-    // MARK: - Album grid
+// MARK: - Control bar
 
-    private var albumColumns: [GridItem] {
-        Array(repeating: GridItem(.flexible(), spacing: 12), count: columnCount)
-    }
+/// Bottom toolbar (undo, delete, skip, favorite, zoom, multi-select). Reads the
+/// view model's transient per-asset state (`isFavorite`, `canUndo`, selection),
+/// so isolating it here keeps a favorite toggle or undo-state change from
+/// re-evaluating the carousel, progress header, or album grid.
+private struct ControlBarView: View {
+    let vm: SortSessionViewModel
+    @Binding var columnCount: Int
+    let onToast: () -> Void
+    let onHideToast: () -> Void
 
-    @ViewBuilder
-    private func albumList(vm: SortSessionViewModel) -> some View {
-        let infos = vm.albumInfos
-        let extras = vm.extraAlbumInfos
-        let memberIDs = Set(vm.memberships.filter(\.isMember).map(\.id))
-        let bulkDirect = vm.isBulkMode && !vm.isMultiSelectActive
-        let bulkDisabled = bulkDirect && vm.bulkSelectedIDs.isEmpty
-        ScrollView {
-            LazyVGrid(columns: albumColumns, spacing: 8) {
-                ForEach(infos, id: \.id) { info in
-                    let isMember = memberIDs.contains(info.id)
-                    Button {
-                        if bulkDirect {
-                            Task {
-                                await vm.bulkSortToAlbum(info.id)
-                                if case .bulkSorted = vm.lastAction { showToast() }
-                            }
-                        } else {
-                            Task {
-                                await vm.toggleAlbum(info.id)
-                                if case .sorted = vm.lastAction { showToast() }
-                            }
-                        }
-                    } label: {
-                        AlbumGridCell(
-                            albumID: info.id,
-                            title: info.title,
-                            count: info.assetCount,
-                            isMember: bulkDirect ? false : isMember,
-                            refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(bulkDisabled)
-                    .contextMenu {
-                        Button("View Contents", systemImage: "photo.on.rectangle") {
-                            viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
-                        }
-                    }
-                }
-                ForEach(vm.pinnedAlbumInfos, id: \.id) { info in
-                    let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
-                    Button {
-                        if bulkDirect {
-                            Task {
-                                await vm.bulkSortToAlbum(info.id)
-                                if case .bulkSorted = vm.lastAction { showToast() }
-                            }
-                        } else {
-                            if !vm.isMultiSelectActive {
-                                vm.activateMultiSelect()
-                            }
-                            Task { await vm.toggleAlbum(info.id) }
-                        }
-                    } label: {
-                        AlbumGridCell(
-                            albumID: info.id,
-                            title: info.title,
-                            count: info.assetCount,
-                            isMember: bulkDirect ? false : isMember,
-                            refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
-                        )
-                        .opacity(isMember ? 1 : 0.6)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(bulkDisabled)
-                    .contextMenu {
-                        Button("View Contents", systemImage: "photo.on.rectangle") {
-                            viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
-                        }
-                    }
-                }
-                ForEach(extras, id: \.id) { info in
-                    let isMember = memberIDs.contains(info.id)
-                    Button {
-                        Task {
-                            await vm.toggleAlbum(info.id)
-                            if case .sorted = vm.lastAction { showToast() }
-                        }
-                    } label: {
-                        AlbumGridCell(
-                            albumID: info.id,
-                            title: info.title,
-                            count: info.assetCount,
-                            isMember: isMember,
-                            refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
-                        )
-                        .opacity(isMember ? 1 : 0.6)
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        Button("View Contents", systemImage: "photo.on.rectangle") {
-                            viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
-                        }
-                    }
-                    .transition(.opacity.combined(with: .offset(y: 20)))
-                }
-            }
-            .padding(.horizontal)
-            .animation(.easeInOut(duration: 0.25), value: infos.map(\.id))
-            .animation(.easeInOut(duration: 0.25), value: vm.pinnedAlbumInfos.map(\.id))
-            .animation(.easeInOut(duration: 0.25), value: vm.extraAlbumIDs)
-            .animation(.easeInOut(duration: 0.25), value: vm.isMultiSelectActive)
-        }
-    }
-
-    // MARK: - Control bar
-
-    private func controlBar(vm: SortSessionViewModel) -> some View {
+    var body: some View {
         let bulkNoSelection = vm.isBulkMode && vm.bulkSelectedIDs.isEmpty
-        return HStack {
+        HStack {
             Button {
-                Task { await vm.undo(); showUndoToast = false }
+                Task { await vm.undo(); onHideToast() }
             } label: {
                 Image(systemName: "arrow.uturn.backward")
                     .frame(width: 44, height: 36)
@@ -449,9 +464,9 @@ struct SortSessionView: View {
 
             Button {
                 if vm.isBulkMode {
-                    Task { await vm.bulkQueueDelete(); showToast() }
+                    Task { await vm.bulkQueueDelete(); onToast() }
                 } else {
-                    Task { await vm.queueDelete(); showToast() }
+                    Task { await vm.queueDelete(); onToast() }
                 }
             } label: {
                 Image(systemName: "trash")
@@ -464,9 +479,9 @@ struct SortSessionView: View {
 
             Button {
                 if vm.isBulkMode {
-                    Task { await vm.bulkSkip(); showToast() }
+                    Task { await vm.bulkSkip(); onToast() }
                 } else {
-                    Task { await vm.skip(); showToast() }
+                    Task { await vm.skip(); onToast() }
                 }
             } label: {
                 Image(systemName: "arrow.right.to.line")
@@ -517,11 +532,11 @@ struct SortSessionView: View {
                 if vm.isMultiSelectActive {
                     Task {
                         await vm.deactivateMultiSelect()
-                        if case .sortedMulti = vm.lastAction { showToast() }
-                        if case .bulkSorted = vm.lastAction { showToast() }
+                        if case .sortedMulti = vm.lastAction { onToast() }
+                        if case .bulkSorted = vm.lastAction { onToast() }
                     }
                 } else {
-                    vm.activateMultiSelect()
+                    Task { await vm.activateMultiSelect() }
                 }
             } label: {
                 Image(systemName: vm.isMultiSelectActive ? "rectangle.stack.fill" : "rectangle.stack")
@@ -531,51 +546,137 @@ struct SortSessionView: View {
         }
         .padding(.horizontal)
     }
+}
 
-    // MARK: - Undo toast
+// MARK: - Album grid
 
-    private func showToast() {
-        showUndoToast = true
-        undoTimer?.cancel()
-        undoTimer = Task {
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            if !Task.isCancelled {
-                showUndoToast = false
-            }
-        }
+/// The scrollable destination-album grid (context albums, pinned albums, and
+/// extras). Extracted into its own view so it diffs independently of the
+/// carousel and control bar, and owns the "view contents" sheet it presents.
+private struct AlbumListView: View {
+    let vm: SortSessionViewModel
+    let columnCount: Int
+    let bottomSafeInset: CGFloat
+    let onToast: () -> Void
+
+    @State private var viewingAlbum: AlbumSheetItem?
+
+    private var albumColumns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: 12), count: columnCount)
     }
 
-    private func undoToast(action: SortSessionViewModel.SortAction, vm: SortSessionViewModel) -> some View {
-        let label: String = {
-            switch action {
-            case .sorted: return "Sorted"
-            case .sortedMulti: return "Sorted"
-            case .skipped: return "Skipped"
-            case .queuedDelete: return "Queued for deletion"
-            case .bulkSorted(_, _, let removed):
-                return "Sorted \(removed.count) photo\(removed.count == 1 ? "" : "s")"
-            case .bulkSkipped(let ids):
-                return "Skipped \(ids.count) photo\(ids.count == 1 ? "" : "s")"
-            case .bulkDeleted(let ids):
-                return "Queued \(ids.count) for deletion"
-            }
-        }()
-        return HStack {
-            Text(label)
-            Spacer()
-            Button("Undo") {
-                Task {
-                    await vm.undo()
-                    showUndoToast = false
+    var body: some View {
+        let infos = vm.albumInfos
+        let extras = vm.extraAlbumInfos
+        let memberIDs = Set(vm.memberships.filter(\.isMember).map(\.id))
+        let bulkDirect = vm.isBulkMode && !vm.isMultiSelectActive
+        let bulkDisabled = bulkDirect && vm.bulkSelectedIDs.isEmpty
+        ScrollView {
+            LazyVGrid(columns: albumColumns, spacing: 8) {
+                ForEach(infos, id: \.id) { info in
+                    let isMember = memberIDs.contains(info.id)
+                    Button {
+                        if bulkDirect {
+                            Task {
+                                await vm.bulkSortToAlbum(info.id)
+                                if case .bulkSorted = vm.lastAction { onToast() }
+                            }
+                        } else {
+                            Task {
+                                await vm.toggleAlbum(info.id)
+                                if case .sorted = vm.lastAction { onToast() }
+                            }
+                        }
+                    } label: {
+                        AlbumGridCell(
+                            albumID: info.id,
+                            title: info.title,
+                            count: info.assetCount,
+                            isMember: bulkDirect ? false : isMember,
+                            refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(bulkDisabled)
+                    .contextMenu {
+                        Button("View Contents", systemImage: "photo.on.rectangle") {
+                            viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
+                        }
+                    }
+                }
+                ForEach(vm.pinnedAlbumInfos, id: \.id) { info in
+                    let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
+                    Button {
+                        if bulkDirect {
+                            Task {
+                                await vm.bulkSortToAlbum(info.id)
+                                if case .bulkSorted = vm.lastAction { onToast() }
+                            }
+                        } else {
+                            Task {
+                                if !vm.isMultiSelectActive {
+                                    await vm.activateMultiSelect()
+                                }
+                                await vm.toggleAlbum(info.id)
+                            }
+                        }
+                    } label: {
+                        AlbumGridCell(
+                            albumID: info.id,
+                            title: info.title,
+                            count: info.assetCount,
+                            isMember: bulkDirect ? false : isMember,
+                            refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
+                        )
+                        .opacity(isMember ? 1 : 0.6)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(bulkDisabled)
+                    .contextMenu {
+                        Button("View Contents", systemImage: "photo.on.rectangle") {
+                            viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
+                        }
+                    }
+                }
+                ForEach(extras, id: \.id) { info in
+                    let isMember = memberIDs.contains(info.id)
+                    Button {
+                        Task {
+                            await vm.toggleAlbum(info.id)
+                            if case .sorted = vm.lastAction { onToast() }
+                        }
+                    } label: {
+                        AlbumGridCell(
+                            albumID: info.id,
+                            title: info.title,
+                            count: info.assetCount,
+                            isMember: isMember,
+                            refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
+                        )
+                        .opacity(isMember ? 1 : 0.6)
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("View Contents", systemImage: "photo.on.rectangle") {
+                            viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
+                        }
+                    }
+                    .transition(.opacity.combined(with: .offset(y: 20)))
                 }
             }
-            .bold()
+            .padding(.horizontal)
+            .animation(.easeInOut(duration: 0.25), value: infos.map(\.id))
+            .animation(.easeInOut(duration: 0.25), value: vm.pinnedAlbumInfos.map(\.id))
+            .animation(.easeInOut(duration: 0.25), value: vm.extraAlbumIDs)
+            .animation(.easeInOut(duration: 0.25), value: vm.isMultiSelectActive)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.ultraThinMaterial, in: Capsule())
-        .padding(.horizontal, 24)
-        .transition(.move(edge: .bottom).combined(with: .opacity))
+        // Extend under the home indicator, then re-add it as a content margin
+        // so the resting content and scroll indicator stay within the safe area.
+        .contentMargins(.bottom, bottomSafeInset)
+        .ignoresSafeArea(.container, edges: .bottom)
+        .sheet(item: $viewingAlbum) { album in
+            AlbumContentsView(album: album)
+        }
     }
 }
 

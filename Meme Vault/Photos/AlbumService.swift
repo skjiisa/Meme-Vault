@@ -56,7 +56,7 @@ enum AlbumService {
     /// resulting `photoLibraryDidChange` callback can be ignored — listeners
     /// that triggered the write already know what changed and update locally.
     private static func performChanges(_ block: @Sendable @escaping () -> Void) async throws {
-        await PhotoLibrary.shared.noteSelfWriteBegin()
+        PhotoLibrary.shared.noteSelfWriteBegin()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             PHPhotoLibrary.shared().performChanges(block) { success, error in
                 if success {
@@ -71,7 +71,9 @@ enum AlbumService {
     // MARK: - Listing
 
     /// Returns all user-created albums (no smart albums) sorted by title.
-    static func listUserAlbums() -> [AlbumInfo] {
+    /// `nonisolated` so it can run off the main actor (it only touches PhotoKit,
+    /// no main-actor state) — callers move the fetch off-main on large libraries.
+    nonisolated static func listUserAlbums() -> [AlbumInfo] {
         let opts = PHFetchOptions()
         opts.sortDescriptors = [NSSortDescriptor(key: "localizedTitle", ascending: true)]
         let result = PHAssetCollection.fetchAssetCollections(
@@ -107,8 +109,9 @@ enum AlbumService {
     }
 
     /// Resolves album local identifiers back to `PHAssetCollection`s. Missing
-    /// IDs are silently dropped.
-    static func collections(for localIDs: [String]) -> [PHAssetCollection] {
+    /// IDs are silently dropped. `nonisolated` so off-main callers (queue
+    /// rebuild, membership prewarm, album-contents load) can use it directly.
+    nonisolated static func collections(for localIDs: [String]) -> [PHAssetCollection] {
         guard !localIDs.isEmpty else { return [] }
         let result = PHAssetCollection.fetchAssetCollections(
             withLocalIdentifiers: localIDs,
@@ -120,7 +123,7 @@ enum AlbumService {
         return out
     }
 
-    static func collection(for localID: String) -> PHAssetCollection? {
+    nonisolated static func collection(for localID: String) -> PHAssetCollection? {
         collections(for: [localID]).first
     }
 
@@ -234,12 +237,14 @@ enum AlbumService {
 
     // MARK: - Asset lookup
 
-    static func asset(for localID: String) -> PHAsset? {
+    /// `nonisolated` so the off-main thumbnail path can resolve assets without
+    /// blocking the main thread on the Photos store fetch.
+    nonisolated static func asset(for localID: String) -> PHAsset? {
         let result = PHAsset.fetchAssets(withLocalIdentifiers: [localID], options: nil)
         return result.firstObject
     }
 
-    static func assets(for localIDs: [String]) -> [PHAsset] {
+    nonisolated static func assets(for localIDs: [String]) -> [PHAsset] {
         guard !localIDs.isEmpty else { return [] }
         let result = PHAsset.fetchAssets(withLocalIdentifiers: localIDs, options: nil)
         var out: [PHAsset] = []

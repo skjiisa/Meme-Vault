@@ -45,6 +45,37 @@ final class ContextEvaluator {
         return ids
     }
 
+    /// Populates the member cache for the given albums off the main actor.
+    /// Each uncached album otherwise triggers a synchronous `fetchAssets` +
+    /// enumeration the first time `members(of:)` is hit inside the rebuild
+    /// loop — a string of main-thread stalls on a large library. Doing the
+    /// fetches up front on a background task keeps the rebuild responsive;
+    /// `members(of:)` then reads straight from the cache.
+    func prewarm(albumIDs: [String]) async {
+        let missing = albumIDs.filter { membersByAlbum[$0] == nil }
+        guard !missing.isEmpty else { return }
+        let fetched: [String: Set<String>] = await Task.detached(priority: .userInitiated) {
+            var out: [String: Set<String>] = [:]
+            for id in missing {
+                guard let collection = AlbumService.collection(for: id) else {
+                    out[id] = []
+                    continue
+                }
+                let assets = PHAsset.fetchAssets(in: collection, options: nil)
+                var ids = Set<String>()
+                ids.reserveCapacity(assets.count)
+                assets.enumerateObjects { a, _, _ in ids.insert(a.localIdentifier) }
+                out[id] = ids
+            }
+            return out
+        }.value
+        // A concurrent toggle may have populated an entry while we fetched; the
+        // live cache wins for those, our snapshot fills only the still-missing.
+        for (id, ids) in fetched where membersByAlbum[id] == nil {
+            membersByAlbum[id] = ids
+        }
+    }
+
     /// Toggling membership outside the evaluator should also patch the cache so
     /// the UI doesn't see a stale state until the next full refresh.
     func noteAdded(asset assetLocalID: String, to albumLocalID: String) {
