@@ -54,21 +54,14 @@ struct AlbumContentsView: View {
     }
 
     private var grid: some View {
-        ScrollView {
-            LazyVGrid(columns: [.init(.adaptive(minimum: 100), spacing: 8)], spacing: 8) {
-                ForEach(assetIDs, id: \.self) { assetID in
-                    ThumbnailCell(assetLocalID: assetID)
-                        .contextMenu {
-                            Button("Remove from Album", systemImage: "minus.circle", role: .destructive) {
-                                removeAssetID = assetID
-                                showRemoveAlert = true
-                            }
-                        }
-                        .transition(.scale.combined(with: .opacity))
+        PhotoGrid(assetIDs: assetIDs) { assetID in
+            ThumbnailCell(assetLocalID: assetID)
+                .contextMenu {
+                    Button("Remove from Album", systemImage: "minus.circle", role: .destructive) {
+                        removeAssetID = assetID
+                        showRemoveAlert = true
+                    }
                 }
-            }
-            .padding(12)
-            .animation(.interactiveSpring(), value: assetIDs)
         }
     }
 

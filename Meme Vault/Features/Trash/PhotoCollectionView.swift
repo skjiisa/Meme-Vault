@@ -131,29 +131,22 @@ struct PhotoCollectionView: View {
     }
 
     private var grid: some View {
-        ScrollView {
-            LazyVGrid(columns: [.init(.adaptive(minimum: 100), spacing: 8)], spacing: 8) {
-                ForEach(assetIDs, id: \.self) { assetID in
-                    Button {
-                        restoreAssetID = assetID
-                        showRestoreAlert = true
-                    } label: {
-                        ThumbnailCell(assetLocalID: assetID, showRestoreIndicator: mode.isTrash)
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        Button(restoreLabel, systemImage: "arrow.uturn.backward") {
-                            restore(assetID: assetID)
-                        }
-                        Button("Delete", systemImage: "trash", role: .destructive) {
-                            deleteItem(assetID: assetID)
-                        }
-                    }
-                    .transition(.scale.combined(with: .opacity))
+        PhotoGrid(assetIDs: assetIDs) { assetID in
+            Button {
+                restoreAssetID = assetID
+                showRestoreAlert = true
+            } label: {
+                ThumbnailCell(assetLocalID: assetID, showRestoreIndicator: mode.isTrash)
+            }
+            .buttonStyle(.plain)
+            .contextMenu {
+                Button(restoreLabel, systemImage: "arrow.uturn.backward") {
+                    restore(assetID: assetID)
+                }
+                Button("Delete", systemImage: "trash", role: .destructive) {
+                    deleteItem(assetID: assetID)
                 }
             }
-            .padding(12)
-            .animation(.interactiveSpring(), value: assetIDs)
         }
     }
 
