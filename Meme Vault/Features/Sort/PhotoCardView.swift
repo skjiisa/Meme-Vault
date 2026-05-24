@@ -77,6 +77,7 @@ private struct PhotoPage: View {
     @State private var animatedImage: UIImage?
     @State private var player: AVPlayer?
     @State private var loopToken: NSObjectProtocol?
+    @State private var muteObservation: NSKeyValueObservation?
     @State private var phase: Phase = .loading
 
     private enum Phase { case loading, loaded, missing }
@@ -167,6 +168,12 @@ private struct PhotoPage: View {
         }
     }
 
+    private static func activatePlaybackAudioSession() {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .moviePlayback)
+        try? session.setActive(true)
+    }
+
     // MARK: - Loading
 
     private func loadStill() async {
@@ -220,6 +227,14 @@ private struct PhotoPage: View {
         teardownPlayer()
         let p = AVPlayer(playerItem: item)
         p.actionAtItemEnd = .none
+        p.isMuted = true
+        // The native player control toggles `isMuted` but not the audio session.
+        // Watch for an unmute and switch to .playback so sound comes through
+        // with the ringer off.
+        muteObservation = p.observe(\.isMuted, options: [.new]) { player, _ in
+            guard !player.isMuted else { return }
+            Self.activatePlaybackAudioSession()
+        }
         loopToken = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: item,
@@ -238,6 +253,8 @@ private struct PhotoPage: View {
             NotificationCenter.default.removeObserver(loopToken)
         }
         loopToken = nil
+        muteObservation?.invalidate()
+        muteObservation = nil
         player = nil
     }
 }
