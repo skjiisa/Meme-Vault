@@ -10,6 +10,7 @@
 
 import SwiftUI
 import Photos
+import AVKit
 
 struct PhotoCardView: View {
     let assetIDs: [String]
@@ -32,7 +33,7 @@ struct PhotoCardView: View {
             ScrollView(.horizontal) {
                 LazyHStack(spacing: spacing) {
                     ForEach(assetIDs, id: \.self) { id in
-                        PhotoPage(assetID: id, targetSize: pixelSize)
+                        PhotoPage(assetID: id, targetSize: pixelSize, isActive: id == currentID)
                             .frame(width: pageWidth, height: pageHeight)
                     }
                 }
@@ -66,12 +67,20 @@ struct PhotoCardView: View {
 private struct PhotoPage: View {
     let assetID: String
     let targetSize: CGSize
+    /// True only for the page centered in the viewport. Gates the relatively
+    /// expensive video/GIF playback so adjacent (prefetched) pages stay still.
+    let isActive: Bool
 
     @State private var image: UIImage?
     @State private var backdrop: UIImage?
+    @State private var kind: MediaKind = .image
+    @State private var animatedImage: UIImage?
+    @State private var player: AVPlayer?
+    @State private var loopToken: NSObjectProtocol?
     @State private var phase: Phase = .loading
 
     private enum Phase { case loading, loaded, missing }
+    private enum MediaKind { case image, gif, video }
 
     var body: some View {
         ZStack {
@@ -96,9 +105,7 @@ private struct PhotoPage: View {
                             .opacity(0.8)
                     }
 
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
+                    foreground(stillImage: image)
                 }
             case .loading:
                 ProgressView()
@@ -109,22 +116,37 @@ private struct PhotoPage: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 16))
-        .task(id: assetID) {
-            image = nil
-            backdrop = nil
-            phase = .loading
-            guard let asset = AlbumService.asset(for: assetID) else {
-                phase = .missing
-                return
+        .task(id: assetID) { await loadStill() }
+        .task(id: isActive) { await managePlayback() }
+        .onDisappear { teardownPlayer() }
+    }
+
+    /// The animating overlay for the active page, falling back to the still
+    /// frame until the animated content is ready (or for plain images).
+    @ViewBuilder
+    private func foreground(stillImage: UIImage) -> some View {
+        switch kind {
+        case .video:
+            if let player {
+                VideoPlayer(player: player)
+            } else {
+                still(stillImage)
             }
-            let loaded = await ImageLoader.shared.loadDisplayImage(for: asset, targetSize: targetSize)
-            guard !Task.isCancelled else { return }
-            image = loaded
-            phase = (loaded == nil) ? .missing : .loaded
-            if let loaded {
-                backdrop = Self.downsampledBackdrop(from: loaded)
+        case .gif:
+            if let animatedImage {
+                AnimatedImageView(image: animatedImage)
+            } else {
+                still(stillImage)
             }
+        case .image:
+            still(stillImage)
         }
+    }
+
+    private func still(_ image: UIImage) -> some View {
+        Image(uiImage: image)
+            .resizable()
+            .scaledToFit()
     }
 
     /// A small copy of the page image used only as the blurred fill. A 60pt
@@ -143,5 +165,106 @@ private struct PhotoPage: View {
         return UIGraphicsImageRenderer(size: newSize, format: format).image { _ in
             image.draw(in: CGRect(origin: .zero, size: newSize))
         }
+    }
+
+    // MARK: - Loading
+
+    private func loadStill() async {
+        image = nil
+        backdrop = nil
+        animatedImage = nil
+        phase = .loading
+        guard let asset = AlbumService.asset(for: assetID) else {
+            phase = .missing
+            return
+        }
+        kind = Self.mediaKind(for: asset)
+        let loaded = await ImageLoader.shared.loadDisplayImage(for: asset, targetSize: targetSize)
+        guard !Task.isCancelled else { return }
+        image = loaded
+        phase = (loaded == nil) ? .missing : .loaded
+        if let loaded {
+            backdrop = Self.downsampledBackdrop(from: loaded)
+        }
+    }
+
+    private func managePlayback() async {
+        guard isActive else {
+            teardownPlayer()
+            return
+        }
+        guard let asset = AlbumService.asset(for: assetID) else { return }
+        switch Self.mediaKind(for: asset) {
+        case .image:
+            break
+        case .gif:
+            guard animatedImage == nil else { return }
+            let decoded = await ImageLoader.shared.loadAnimatedImage(for: asset)
+            guard !Task.isCancelled else { return }
+            animatedImage = decoded
+        case .video:
+            guard let item = await ImageLoader.shared.loadPlayerItem(for: asset) else { return }
+            guard !Task.isCancelled else { return }
+            setupPlayer(item: item)
+        }
+    }
+
+    private static func mediaKind(for asset: PHAsset) -> MediaKind {
+        if asset.mediaType == .video { return .video }
+        return asset.playbackStyle == .imageAnimated ? .gif : .image
+    }
+
+    // MARK: - Video player lifecycle
+
+    private func setupPlayer(item: AVPlayerItem) {
+        teardownPlayer()
+        let p = AVPlayer(playerItem: item)
+        p.actionAtItemEnd = .none
+        loopToken = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak p] _ in
+            p?.seek(to: .zero)
+            p?.play()
+        }
+        player = p
+        p.play()
+    }
+
+    private func teardownPlayer() {
+        player?.pause()
+        if let loopToken {
+            NotificationCenter.default.removeObserver(loopToken)
+        }
+        loopToken = nil
+        player = nil
+    }
+}
+
+// MARK: - Animated image host
+
+/// Hosts a `UIImageView` so animated `UIImage`s (decoded GIFs) actually play —
+/// SwiftUI's `Image` renders only the first frame.
+private struct AnimatedImageView: UIViewRepresentable {
+    let image: UIImage
+
+    func makeUIView(context: Context) -> UIImageView {
+        let view = UIImageView()
+        view.contentMode = .scaleAspectFit
+        view.clipsToBounds = true
+        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        view.setContentHuggingPriority(.defaultLow, for: .vertical)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        view.image = image
+        view.startAnimating()
+        return view
+    }
+
+    func updateUIView(_ uiView: UIImageView, context: Context) {
+        guard uiView.image !== image else { return }
+        uiView.image = image
+        uiView.startAnimating()
     }
 }
