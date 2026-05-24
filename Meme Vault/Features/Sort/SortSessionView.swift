@@ -23,15 +23,8 @@ struct SortSessionView: View {
     @State private var columnCount = 3
     @State private var hasAppeared = false
     @State private var topSafeInset: CGFloat = 0
-    @State private var contentMaxY: CGFloat = 0
-    @State private var screenHeight: CGFloat = 0
+    @State private var bottomSafeInset: CGFloat = 0
     @Namespace private var thumbnailNamespace
-
-    // The bottom inset (home indicator) the album list extends under and must
-    // re-add as a content margin so its content rests above the indicator.
-    private var bottomSafeInset: CGFloat {
-        max(0, screenHeight - contentMaxY)
-    }
 
     private var columnCountKey: String {
         "albumGridColumns_\(context.uuid.uuidString)"
@@ -51,20 +44,15 @@ struct SortSessionView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        // The content area sits between the nav bar and the home indicator, so
-        // its global top/bottom offsets give the insets the grid and album list
-        // extend under and must re-add as content margins.
-        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
-            topSafeInset = frame.minY
-            contentMaxY = frame.maxY
-        }
-        .background {
-            // Full-screen probe for the device height, used to derive the
-            // bottom inset (height − content bottom).
-            Color.clear
-                .ignoresSafeArea()
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { screenHeight = $0 }
-        }
+        // The content sits between the nav bar and the home indicator; the grid
+        // and album list extend under those edges and re-add these insets as
+        // content margins. The top inset is the content's global offset (the
+        // nav bar isn't surfaced as a safe-area inset on the content). The
+        // bottom inset is read from the safe area directly so it stays correct
+        // even though the album list extends under the home indicator — reading
+        // the content's own maxY would just report the extended (screen) edge.
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { topSafeInset = $0 }
+        .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.bottom } action: { bottomSafeInset = $0 }
         .navigationTitle(context.name.isEmpty ? "Sort" : context.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
