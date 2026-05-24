@@ -26,6 +26,15 @@ enum AssetSource {
     /// default, excludes hidden and recently-deleted (PhotoKit excludes those
     /// by default).
     static func queue(for context: OrgContext) -> AssetQueue {
+        queue(sourceKind: context.sourceKind, sourceAlbumLocalID: context.sourceAlbumLocalID)
+    }
+
+    /// Sendable-input variant of `queue(for:)`. `OrgContext` is a SwiftData
+    /// model and isn't `Sendable`, so callers read these two values on the main
+    /// actor and pass them here; the actual fetch + enumeration (which can span
+    /// tens of thousands of assets and otherwise blocks the main thread) can
+    /// then run off the main actor.
+    nonisolated static func queue(sourceKind: SourceKind, sourceAlbumLocalID: String?) -> AssetQueue {
         let opts = PHFetchOptions()
         opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
         // Default media types: images + videos. Audio is rarely in albums; skip.
@@ -36,12 +45,12 @@ enum AssetSource {
         )
 
         let fetch: PHFetchResult<PHAsset>
-        switch context.sourceKind {
+        switch sourceKind {
         case .allPhotos:
             fetch = PHAsset.fetchAssets(with: opts)
         case .album:
             guard
-                let albumID = context.sourceAlbumLocalID,
+                let albumID = sourceAlbumLocalID,
                 let collection = AlbumService.collection(for: albumID)
             else {
                 return AssetQueue(assetLocalIDs: [])

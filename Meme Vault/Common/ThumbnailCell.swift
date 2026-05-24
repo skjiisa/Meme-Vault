@@ -44,8 +44,7 @@ struct ThumbnailCell: View {
                 }
             }
             .task(id: assetLocalID) {
-                guard let asset = AlbumService.asset(for: assetLocalID) else { return }
-                let (stream, cancel) = ImageLoader.shared.thumbnailStream(for: asset, targetSize: targetSize)
+                let (stream, cancel) = ImageLoader.shared.thumbnailStream(forLocalID: assetLocalID, targetSize: targetSize)
                 await withTaskCancellationHandler {
                     for await image in stream { thumbnail = image }
                 } onCancel: {

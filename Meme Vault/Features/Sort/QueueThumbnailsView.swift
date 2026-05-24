@@ -11,8 +11,18 @@ struct QueueThumbnailsView: View {
 
     private let gridColumns = Array(repeating: GridItem(.flexible(), spacing: 3), count: 5)
 
+    // Only the first N items participate in the strip↔grid morph. That's enough
+    // to reshape the visible top rows when toggling modes; matching every one of
+    // (potentially thousands of) cells makes each publish its frame on every
+    // layout pass — and can force a lazy container to resolve off-screen matched
+    // cells — which dominated the bulk-mode transition/scroll cost in profiling.
+    // Bounding it to a fixed prefix caps that cost regardless of queue size.
+    private static let morphPrefixCount = 25
+    private var morphIDs: Set<String> { Set(assetIDs.prefix(Self.morphPrefixCount)) }
+
     var body: some View {
         if isBulkMode {
+            let morphIDs = morphIDs
             ScrollView {
                 LazyVGrid(columns: gridColumns, spacing: 3) {
                     ForEach(assetIDs, id: \.self) { id in
@@ -38,7 +48,7 @@ struct QueueThumbnailsView: View {
                                 }
                         }
                         .buttonStyle(.plain)
-                        .matchedGeometryEffect(id: id, in: namespace)
+                        .matchedGeometry(id: id, in: namespace, active: morphIDs.contains(id))
                         .transition(.asymmetric(
                             insertion: .scale(scale: 0.8).combined(with: .opacity),
                             removal: .scale(scale: 0.5).combined(with: .opacity)
@@ -50,6 +60,7 @@ struct QueueThumbnailsView: View {
                 .animation(.easeInOut(duration: 0.3), value: assetIDs)
             }
         } else if !assetIDs.isEmpty {
+            let morphIDs = morphIDs
             ScrollViewReader { proxy in
                 ScrollView(.horizontal) {
                     LazyHStack(spacing: 6) {
@@ -67,7 +78,7 @@ struct QueueThumbnailsView: View {
                             }
                             .buttonStyle(.plain)
                             .id(id)
-                            .matchedGeometryEffect(id: id, in: namespace)
+                            .matchedGeometry(id: id, in: namespace, active: morphIDs.contains(id))
                             .transition(.scale(scale: 0.5).combined(with: .opacity))
                         }
                     }
@@ -119,13 +130,27 @@ struct QueueThumbnail: View {
             .clipped()
             .clipShape(.rect(cornerRadius: 4))
             .task(id: assetID) {
-                guard let asset = AlbumService.asset(for: assetID) else { return }
-                let (stream, cancel) = ImageLoader.shared.thumbnailStream(for: asset, targetSize: targetSize)
+                let (stream, cancel) = ImageLoader.shared.thumbnailStream(forLocalID: assetID, targetSize: targetSize)
                 await withTaskCancellationHandler {
                     for await image in stream { thumbnail = image }
                 } onCancel: {
                     cancel()
                 }
             }
+    }
+}
+
+private extension View {
+    /// Applies `matchedGeometryEffect` only when `active`. The active/inactive
+    /// decision is stable for a given cell while scrolling (it's keyed on the
+    /// item's fixed position in the queue), so this doesn't churn identity
+    /// mid-scroll — it only flips if the queue itself changes.
+    @ViewBuilder
+    func matchedGeometry(id: String, in namespace: Namespace.ID, active: Bool) -> some View {
+        if active {
+            matchedGeometryEffect(id: id, in: namespace)
+        } else {
+            self
+        }
     }
 }

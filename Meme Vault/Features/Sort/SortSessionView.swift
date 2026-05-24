@@ -548,7 +548,7 @@ private struct ControlBarView: View {
                         if case .bulkSorted = vm.lastAction { onToast() }
                     }
                 } else {
-                    vm.activateMultiSelect()
+                    Task { await vm.activateMultiSelect() }
                 }
             } label: {
                 Image(systemName: vm.isMultiSelectActive ? "rectangle.stack.fill" : "rectangle.stack")
@@ -625,10 +625,12 @@ private struct AlbumListView: View {
                                 if case .bulkSorted = vm.lastAction { onToast() }
                             }
                         } else {
-                            if !vm.isMultiSelectActive {
-                                vm.activateMultiSelect()
+                            Task {
+                                if !vm.isMultiSelectActive {
+                                    await vm.activateMultiSelect()
+                                }
+                                await vm.toggleAlbum(info.id)
                             }
-                            Task { await vm.toggleAlbum(info.id) }
                         }
                     } label: {
                         AlbumGridCell(

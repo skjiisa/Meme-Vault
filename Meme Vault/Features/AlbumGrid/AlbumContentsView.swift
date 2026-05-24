@@ -37,7 +37,7 @@ struct AlbumContentsView: View {
                 }
             }
         }
-        .task { loadAssets() }
+        .task { await loadAssets() }
         .alert("Remove from Album?", isPresented: $showRemoveAlert) {
             Button("Remove", role: .destructive) {
                 if let id = removeAssetID {
@@ -72,16 +72,23 @@ struct AlbumContentsView: View {
         }
     }
 
-    private func loadAssets() {
-        guard let collection = AlbumService.collection(for: album.id) else { return }
-        let opts = PHFetchOptions()
-        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        let result = PHAsset.fetchAssets(in: collection, options: opts)
-        var ids: [String] = []
-        ids.reserveCapacity(result.count)
-        result.enumerateObjects { asset, _, _ in
-            ids.append(asset.localIdentifier)
-        }
+    private func loadAssets() async {
+        // Enumerating a large album synchronously on the main actor freezes the
+        // sheet on open (≈100–200 ms on a big library), so do it off-main and
+        // hand back the plain (Sendable) IDs.
+        let albumID = album.id
+        let ids = await Task.detached(priority: .userInitiated) { () -> [String] in
+            guard let collection = AlbumService.collection(for: albumID) else { return [] }
+            let opts = PHFetchOptions()
+            opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+            let result = PHAsset.fetchAssets(in: collection, options: opts)
+            var ids: [String] = []
+            ids.reserveCapacity(result.count)
+            result.enumerateObjects { asset, _, _ in
+                ids.append(asset.localIdentifier)
+            }
+            return ids
+        }.value
         assetIDs = ids
     }
 

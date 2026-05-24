@@ -17,6 +17,9 @@ import UIKit
 final class ImageLoader {
     static let shared = ImageLoader()
 
+    // PhotoKit's caching manager is `Sendable` and serialises internally, so the
+    // off-main thumbnail path (`thumbnailStream`) can use it directly alongside
+    // the main-actor methods here.
     private let manager = PHCachingImageManager()
 
     /// Shared request options for both display requests and the prefetch window.
@@ -33,7 +36,7 @@ final class ImageLoader {
 
     /// Options for fast thumbnail requests — accepts the first result PhotoKit
     /// returns (including degraded) so grid cells and strips populate instantly.
-    private let thumbnailOptions: PHImageRequestOptions = {
+    nonisolated(unsafe) private let thumbnailOptions: PHImageRequestOptions = {
         let o = PHImageRequestOptions()
         o.deliveryMode = .opportunistic
         o.resizeMode = .fast
@@ -107,46 +110,74 @@ final class ImageLoader {
     /// sharp full-quality result when PhotoKit finishes decoding it. Unlike
     /// `loadThumbnail`, this does not get stuck on the degraded pass.
     ///
+    /// Takes a local identifier rather than a resolved `PHAsset`: the asset
+    /// lookup (`PHAsset.fetchAssets`, which hits the Photos store over XPC) is
+    /// done on a background task alongside the image request, so the per-cell
+    /// resolution no longer blocks the main thread while scrolling.
+    ///
     /// Returns the stream plus a `cancel` handle. Callers should drive the stream
     /// inside `withTaskCancellationHandler` and call `cancel` from `onCancel`: an
     /// `AsyncStream` does not finish on its own when the consuming task is
     /// cancelled, so without this the PhotoKit request would run to completion
-    /// even after the cell scrolled away. Cancelling finishes the stream, which
-    /// (via `onTermination`) cancels the request — so fast scrolling stops piling
-    /// up orphaned full-resolution decodes that would otherwise stutter it.
-    func thumbnailStream(
-        for asset: PHAsset,
+    /// even after the cell scrolled away. Cancelling finishes the stream and
+    /// cancels the request — so fast scrolling stops piling up orphaned decodes.
+    nonisolated func thumbnailStream(
+        forLocalID localID: String,
         targetSize: CGSize
     ) -> (stream: AsyncStream<UIImage>, cancel: @Sendable () -> Void) {
+        // Shared mutable state across the build closure, the background resolve,
+        // the PhotoKit callback, and the cancel handle. PhotoKit serialises its
+        // own callbacks and the residual races here are benign (worst case: one
+        // request briefly outlives a cancel), matching this file's existing
+        // `@unchecked Sendable` boxing for the same kind of bridge.
         final class Holder: @unchecked Sendable {
-            nonisolated(unsafe) var continuation: AsyncStream<UIImage>.Continuation?
+            var continuation: AsyncStream<UIImage>.Continuation?
+            var requestID: PHImageRequestID?
+            var cancelled = false
         }
         let holder = Holder()
+        // Capture the Sendable manager locally so the @Sendable closures below
+        // don't have to reach back through the main-actor `ImageLoader.shared`.
+        let manager = self.manager
 
         let stream = AsyncStream<UIImage> { continuation in
             holder.continuation = continuation
-            let id = manager.requestImage(
-                for: asset,
-                targetSize: targetSize,
-                contentMode: .aspectFill,
-                options: thumbnailOptions
-            ) { image, info in
-                if let image { continuation.yield(image) }
-                let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                let isCancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
-                let hasError = info?[PHImageErrorKey] != nil
-                // A non-degraded image is the final, sharp result; cancellation
-                // or error means nothing more is coming. Either way we're done.
-                if !isDegraded || isCancelled || hasError {
+            Task.detached(priority: .userInitiated) { [self] in
+                guard !holder.cancelled, let asset = AlbumService.asset(for: localID) else {
                     continuation.finish()
+                    return
                 }
+                let id = manager.requestImage(
+                    for: asset,
+                    targetSize: targetSize,
+                    contentMode: .aspectFill,
+                    options: thumbnailOptions
+                ) { image, info in
+                    if let image { continuation.yield(image) }
+                    let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                    let isCancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
+                    let hasError = info?[PHImageErrorKey] != nil
+                    // A non-degraded image is the final, sharp result; cancellation
+                    // or error means nothing more is coming. Either way we're done.
+                    if !isDegraded || isCancelled || hasError {
+                        continuation.finish()
+                    }
+                }
+                holder.requestID = id
+                // Cancelled between kicking this off and getting the id back.
+                if holder.cancelled { manager.cancelImageRequest(id) }
             }
             continuation.onTermination = { _ in
-                Task { @MainActor in ImageLoader.shared.manager.cancelImageRequest(id) }
+                if let id = holder.requestID {
+                    manager.cancelImageRequest(id)
+                }
             }
         }
 
-        return (stream, { holder.continuation?.finish() })
+        return (stream, {
+            holder.cancelled = true
+            holder.continuation?.finish()
+        })
     }
 
     // MARK: - Prefetch window
