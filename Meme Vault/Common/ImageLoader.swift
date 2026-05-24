@@ -12,6 +12,8 @@
 import Foundation
 import Photos
 import UIKit
+import AVFoundation
+import ImageIO
 
 @MainActor
 final class ImageLoader {
@@ -200,6 +202,52 @@ final class ImageLoader {
         })
     }
 
+    // MARK: - Animated image (GIF)
+
+    /// Load the raw image data for an animated asset and decode it into an
+    /// animated `UIImage` (honouring per-frame GIF delays). Returns `nil` for
+    /// assets that turn out not to be animated.
+    func loadAnimatedImage(for asset: PHAsset) async -> UIImage? {
+        await withCheckedContinuation { (cont: CheckedContinuation<UIImage?, Never>) in
+            let opts = PHImageRequestOptions()
+            opts.deliveryMode = .highQualityFormat
+            opts.isNetworkAccessAllowed = true
+            opts.version = .current
+            opts.isSynchronous = false
+
+            final class Box: @unchecked Sendable { var resumed = false }
+            let box = Box()
+
+            manager.requestImageDataAndOrientation(for: asset, options: opts) { data, _, _, _ in
+                guard !box.resumed else { return }
+                box.resumed = true
+                guard let data else { cont.resume(returning: nil); return }
+                cont.resume(returning: UIImage.animatedImage(withGIFData: data))
+            }
+        }
+    }
+
+    // MARK: - Video
+
+    /// Load a playback-ready `AVPlayerItem` for a video asset, streaming from
+    /// iCloud if necessary.
+    func loadPlayerItem(for asset: PHAsset) async -> AVPlayerItem? {
+        await withCheckedContinuation { (cont: CheckedContinuation<AVPlayerItem?, Never>) in
+            let opts = PHVideoRequestOptions()
+            opts.deliveryMode = .automatic
+            opts.isNetworkAccessAllowed = true
+
+            final class Box: @unchecked Sendable { var resumed = false }
+            let box = Box()
+
+            manager.requestPlayerItem(forVideo: asset, options: opts) { item, _ in
+                guard !box.resumed else { return }
+                box.resumed = true
+                cont.resume(returning: item)
+            }
+        }
+    }
+
     // MARK: - Prefetch window
 
     /// Declare the exact set of asset IDs that should be kept warm right now.
@@ -306,5 +354,43 @@ final class ImageLoader {
         cacheTargetSize = .zero
         thumbnailCache.removeAllObjects()
         thumbInFlight.removeAll(keepingCapacity: false)
+    }
+}
+
+// MARK: - GIF decoding
+
+extension UIImage {
+    /// Decode GIF data into an animated `UIImage` whose total duration reflects
+    /// the per-frame delays. Returns a static image if the data has a single
+    /// frame, or `nil` if it can't be decoded.
+    static func animatedImage(withGIFData data: Data) -> UIImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            return UIImage(data: data)
+        }
+        let count = CGImageSourceGetCount(source)
+        guard count > 1 else { return UIImage(data: data) }
+
+        var frames: [UIImage] = []
+        frames.reserveCapacity(count)
+        var totalDuration: Double = 0
+
+        for i in 0..<count {
+            guard let cg = CGImageSourceCreateImageAtIndex(source, i, nil) else { continue }
+            totalDuration += gifFrameDelay(source: source, index: i)
+            frames.append(UIImage(cgImage: cg))
+        }
+
+        guard !frames.isEmpty else { return UIImage(data: data) }
+        return UIImage.animatedImage(with: frames, duration: totalDuration)
+    }
+
+    private static func gifFrameDelay(source: CGImageSource, index: Int) -> Double {
+        guard let props = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any],
+              let gif = props[kCGImagePropertyGIFDictionary] as? [CFString: Any] else { return 0.1 }
+        let delay = (gif[kCGImagePropertyGIFUnclampedDelayTime] as? Double)
+            ?? (gif[kCGImagePropertyGIFDelayTime] as? Double)
+            ?? 0.1
+        // Browsers clamp very short frame delays; mirror that to avoid hyper-speed playback.
+        return delay < 0.011 ? 0.1 : delay
     }
 }
