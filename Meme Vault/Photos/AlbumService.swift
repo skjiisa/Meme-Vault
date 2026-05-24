@@ -56,7 +56,7 @@ enum AlbumService {
     /// resulting `photoLibraryDidChange` callback can be ignored — listeners
     /// that triggered the write already know what changed and update locally.
     private static func performChanges(_ block: @Sendable @escaping () -> Void) async throws {
-        await PhotoLibrary.shared.noteSelfWriteBegin()
+        PhotoLibrary.shared.noteSelfWriteBegin()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             PHPhotoLibrary.shared().performChanges(block) { success, error in
                 if success {
@@ -244,7 +244,7 @@ enum AlbumService {
         return result.firstObject
     }
 
-    static func assets(for localIDs: [String]) -> [PHAsset] {
+    nonisolated static func assets(for localIDs: [String]) -> [PHAsset] {
         guard !localIDs.isEmpty else { return [] }
         let result = PHAsset.fetchAssets(withLocalIdentifiers: localIDs, options: nil)
         var out: [PHAsset] = []

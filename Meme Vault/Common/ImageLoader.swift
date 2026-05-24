@@ -49,6 +49,19 @@ final class ImageLoader {
     private var cachedWindow: [String: PHAsset] = [:]
     private var cacheTargetSize: CGSize = .zero
 
+    /// In-memory cache of *decoded* thumbnail images, keyed by local ID + pixel
+    /// size. Lets a cell paint a previously-loaded (or prefetched) thumbnail
+    /// synchronously on appear instead of going through the async request and
+    /// flashing a placeholder. Thread-safe, so usable from the off-main paths.
+    nonisolated(unsafe) private let thumbnailCache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 500
+        return cache
+    }()
+    /// Thumbnail keys currently being resolved/decoded by a prefetch, so the
+    /// same asset isn't requested twice while it's in flight.
+    private var thumbInFlight: Set<String> = []
+
     // MARK: - Display request
 
     /// Request a display-quality image for the asset. Returns the highest-
@@ -153,8 +166,15 @@ final class ImageLoader {
                     contentMode: .aspectFill,
                     options: thumbnailOptions
                 ) { image, info in
-                    if let image { continuation.yield(image) }
                     let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                    if let image {
+                        continuation.yield(image)
+                        // Cache the sharp result so the cell (or a later re-appear)
+                        // can paint it synchronously next time, without a request.
+                        if !isDegraded {
+                            self.thumbnailCache.setObject(image, forKey: Self.thumbKey(localID, targetSize))
+                        }
+                    }
                     let isCancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
                     let hasError = info?[PHImageErrorKey] != nil
                     // A non-degraded image is the final, sharp result; cancellation
@@ -216,10 +236,75 @@ final class ImageLoader {
         }
     }
 
+    // MARK: - Thumbnail cache + prefetch
+
+    nonisolated static func thumbKey(_ localID: String, _ size: CGSize) -> NSString {
+        // Square thumbnails, so the width pixel size identifies the variant.
+        "\(localID)@\(Int(size.width))" as NSString
+    }
+
+    /// Returns the decoded thumbnail for this asset+size if it's already in the
+    /// in-memory cache — synchronous, so a cell can paint it on first render
+    /// without a request and without flashing a placeholder.
+    nonisolated func cachedThumbnail(localID: String, targetSize: CGSize) -> UIImage? {
+        thumbnailCache.object(forKey: Self.thumbKey(localID, targetSize))
+    }
+
+    /// Eagerly decode the given thumbnails into the in-memory cache so upcoming
+    /// cells can paint synchronously. Skips anything already cached or in flight;
+    /// asset resolution and decoding run off the main actor. Unlike PhotoKit's
+    /// `startCachingImages` (which only pre-warms the decode), this produces the
+    /// actual `UIImage` the cell needs, so no per-cell request/placeholder.
+    func prefetchThumbnails(localIDs: [String], targetSize: CGSize) {
+        guard targetSize.width > 0, targetSize.height > 0 else { return }
+
+        let toLoad = localIDs.filter { id in
+            let key = Self.thumbKey(id, targetSize) as String
+            return thumbnailCache.object(forKey: key as NSString) == nil && !thumbInFlight.contains(key)
+        }
+        guard !toLoad.isEmpty else { return }
+        for id in toLoad { thumbInFlight.insert(Self.thumbKey(id, targetSize) as String) }
+
+        let manager = self.manager
+        Task.detached(priority: .utility) { [self] in
+            let assets = AlbumService.assets(for: toLoad)
+            let resolvedIDs = Set(assets.map(\.localIdentifier))
+            // Release in-flight markers for IDs that didn't resolve to an asset.
+            await MainActor.run {
+                for id in toLoad where !resolvedIDs.contains(id) {
+                    thumbInFlight.remove(Self.thumbKey(id, targetSize) as String)
+                }
+            }
+            for asset in assets {
+                // Keep the key as a Sendable String; convert to NSString only at
+                // the NSCache call so the @Sendable callback captures nothing else.
+                let keyString = Self.thumbKey(asset.localIdentifier, targetSize) as String
+                manager.requestImage(
+                    for: asset,
+                    targetSize: targetSize,
+                    contentMode: .aspectFill,
+                    options: thumbnailOptions
+                ) { image, info in
+                    let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                    if let image, !isDegraded {
+                        self.thumbnailCache.setObject(image, forKey: keyString as NSString)
+                    }
+                    let isCancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
+                    let hasError = info?[PHImageErrorKey] != nil
+                    if !isDegraded || isCancelled || hasError {
+                        Task { @MainActor in self.thumbInFlight.remove(keyString) }
+                    }
+                }
+            }
+        }
+    }
+
     /// Drop the entire cache. Call when leaving the sort flow.
     func reset() {
         manager.stopCachingImagesForAllAssets()
         cachedWindow.removeAll(keepingCapacity: false)
         cacheTargetSize = .zero
+        thumbnailCache.removeAllObjects()
+        thumbInFlight.removeAll(keepingCapacity: false)
     }
 }

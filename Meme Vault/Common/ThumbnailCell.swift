@@ -44,6 +44,10 @@ struct ThumbnailCell: View {
                 }
             }
             .task(id: assetLocalID) {
+                if let cached = ImageLoader.shared.cachedThumbnail(localID: assetLocalID, targetSize: targetSize) {
+                    thumbnail = cached
+                    return
+                }
                 let (stream, cancel) = ImageLoader.shared.thumbnailStream(forLocalID: assetLocalID, targetSize: targetSize)
                 await withTaskCancellationHandler {
                     for await image in stream { thumbnail = image }

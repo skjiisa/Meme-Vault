@@ -9,7 +9,16 @@ struct QueueThumbnailsView: View {
     let onTap: (String) -> Void
     var namespace: Namespace.ID
 
+    @Environment(\.displayScale) private var displayScale
+
     private let gridColumns = Array(repeating: GridItem(.flexible(), spacing: 3), count: 5)
+
+    // The bulk grid's QueueThumbnail uses the default 80pt edge; the prefetch
+    // request must use the same pixel size / mode / options to land cache hits.
+    private var bulkThumbTargetSize: CGSize {
+        let side = 80 * displayScale
+        return CGSize(width: side, height: side)
+    }
 
     // Only the first N items participate in the strip↔grid morph. That's enough
     // to reshape the visible top rows when toggling modes; matching every one of
@@ -20,12 +29,29 @@ struct QueueThumbnailsView: View {
     private static let morphPrefixCount = 25
     private var morphIDs: Set<String> { Set(assetIDs.prefix(Self.morphPrefixCount)) }
 
+    // How many cells past a just-appeared cell to decode ahead (≈ rows × 5).
+    // Bump this if fast flings still outrun the cache.
+    private let prefetchAheadCount = 30
+
+    /// Decode the cells just past `index` into the cache so they're ready when
+    /// they scroll in. Cheap to over-call: `prefetchThumbnails` skips anything
+    /// already cached or in flight.
+    private func prefetchAhead(from index: Int) {
+        let lower = index + 1
+        let upper = min(assetIDs.count, lower + prefetchAheadCount)
+        guard lower < upper else { return }
+        ImageLoader.shared.prefetchThumbnails(
+            localIDs: Array(assetIDs[lower..<upper]),
+            targetSize: bulkThumbTargetSize
+        )
+    }
+
     var body: some View {
         if isBulkMode {
             let morphIDs = morphIDs
             ScrollView {
                 LazyVGrid(columns: gridColumns, spacing: 3) {
-                    ForEach(assetIDs, id: \.self) { id in
+                    ForEach(Array(assetIDs.enumerated()), id: \.element) { index, id in
                         let isSelected = selectedIDs.contains(id)
                         Button { onTap(id) } label: {
                             QueueThumbnail(assetID: id)
@@ -53,6 +79,9 @@ struct QueueThumbnailsView: View {
                             insertion: .scale(scale: 0.8).combined(with: .opacity),
                             removal: .scale(scale: 0.5).combined(with: .opacity)
                         ))
+                        // Look-ahead: as each cell appears, decode the next rows
+                        // into the cache so they paint instantly on arrival.
+                        .onAppear { prefetchAhead(from: index) }
                     }
                 }
                 .padding(.horizontal)
@@ -130,6 +159,11 @@ struct QueueThumbnail: View {
             .clipped()
             .clipShape(.rect(cornerRadius: 4))
             .task(id: assetID) {
+                // Paint immediately if already decoded (prefetched or seen before).
+                if let cached = ImageLoader.shared.cachedThumbnail(localID: assetID, targetSize: targetSize) {
+                    thumbnail = cached
+                    return
+                }
                 let (stream, cancel) = ImageLoader.shared.thumbnailStream(forLocalID: assetID, targetSize: targetSize)
                 await withTaskCancellationHandler {
                     for await image in stream { thumbnail = image }
