@@ -99,21 +99,37 @@ struct AlbumGridCell: View {
     }
 
     private func loadThumbnails() async -> [AlbumThumbnail] {
-        guard let collection = AlbumService.collection(for: albumID) else { return [] }
-        let opts = PHFetchOptions()
-        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        opts.fetchLimit = 4
-        let result = PHAsset.fetchAssets(in: collection, options: opts)
-        var items: [AlbumThumbnail] = []
-        for i in 0..<result.count {
-            let asset = result.object(at: i)
-            if let image = await ImageLoader.shared.loadThumbnail(
-                for: asset,
-                targetSize: CGSize(width: 200, height: 200)
-            ) {
-                items.append(AlbumThumbnail(id: asset.localIdentifier, image: image))
+        let albumID = self.albumID
+        let targetSize = CGSize(width: 200, height: 200)
+        let loader = ImageLoader.shared
+
+        let assets: [PHAsset] = await Task.detached(priority: .userInitiated) {
+            guard let collection = AlbumService.collection(for: albumID) else { return [] }
+            let opts = PHFetchOptions()
+            opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+            opts.fetchLimit = 4
+            let result = PHAsset.fetchAssets(in: collection, options: opts)
+            var out: [PHAsset] = []
+            for i in 0..<result.count { out.append(result.object(at: i)) }
+            return out
+        }.value
+
+        guard !Task.isCancelled, !assets.isEmpty else { return [] }
+
+        return await withTaskGroup(of: (Int, AlbumThumbnail?).self) { group in
+            for (index, asset) in assets.enumerated() {
+                group.addTask {
+                    guard let image = await loader.loadCachedThumbnail(
+                        for: asset, targetSize: targetSize
+                    ) else { return (index, nil) }
+                    return (index, AlbumThumbnail(id: asset.localIdentifier, image: image))
+                }
             }
+            var indexed: [(Int, AlbumThumbnail)] = []
+            for await (index, thumb) in group {
+                if let thumb { indexed.append((index, thumb)) }
+            }
+            return indexed.sorted(by: { $0.0 < $1.0 }).map(\.1)
         }
-        return items
     }
 }
