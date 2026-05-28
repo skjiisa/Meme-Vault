@@ -261,7 +261,11 @@ struct SortSessionView: View {
             Button("Undo") {
                 Task {
                     await vm.undo()
-                    showUndoToast = false
+                    if vm.canUndo {
+                        showToast()
+                    } else {
+                        showUndoToast = false
+                    }
                 }
             }
             .bold()

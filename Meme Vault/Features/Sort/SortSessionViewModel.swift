@@ -32,8 +32,11 @@ final class SortSessionViewModel {
     /// Per-album membership for the current asset.
     private(set) var memberships: [AlbumMembership] = []
 
-    /// Recently-acted-on assets for undo of skip/delete.
-    private(set) var lastAction: SortAction?
+    /// Undo history stack (most recent action last). Capped at 50 entries.
+    private(set) var undoStack: [SortAction] = []
+
+    /// Most recent action (top of undo stack), used by the toast UI.
+    var lastAction: SortAction? { undoStack.last }
 
     /// When true, album taps don't auto-advance.
     var isMultiSelectActive: Bool = false
@@ -77,7 +80,12 @@ final class SortSessionViewModel {
         case bulkDeleted(localIDs: [String])
     }
 
-    var canUndo: Bool { lastAction != nil }
+    var canUndo: Bool { !undoStack.isEmpty }
+
+    private func pushUndo(_ action: SortAction) {
+        undoStack.append(action)
+        if undoStack.count > 50 { undoStack.removeFirst() }
+    }
 
     /// Albums pending addition in multi-select mode (committed on deactivate).
     private(set) var multiSelectAdds: Set<String> = []
@@ -341,7 +349,7 @@ final class SortSessionViewModel {
                 if !wasSatisfied {
                     let newMemberships = evaluator.albumMemberships(for: asset, in: context)
                     if newMemberships.contains(where: \.isMember) {
-                        lastAction = .sorted(localID: asset.localIdentifier, albumID: albumLocalID)
+                        pushUndo(.sorted(localID: asset.localIdentifier, albumID: albumLocalID))
                         Haptics.tap()
                         advance(removingCurrent: true)
                         return
@@ -473,11 +481,11 @@ final class SortSessionViewModel {
         recomputeMemberships()
 
         if hasChanges && isSatisfied {
-            lastAction = .sortedMulti(
+            pushUndo(.sortedMulti(
                 localID: asset.localIdentifier,
                 adds: Array(adds),
                 removes: Array(removes)
-            )
+            ))
             Haptics.tap()
             advance(removingCurrent: true)
         }
@@ -556,11 +564,11 @@ final class SortSessionViewModel {
             bulkSelectedIDs.subtract(removedFromQueue)
         }
 
-        lastAction = .bulkSorted(
+        pushUndo(.bulkSorted(
             addedByAlbum: addedByAlbum,
             removedByAlbum: removedByAlbum,
             removedFromQueue: removedFromQueue
-        )
+        ))
         Haptics.success()
         recomputeMemberships()
         refreshCurrent()
@@ -655,11 +663,11 @@ final class SortSessionViewModel {
 
         bulkSelectedIDs.subtract(removedIDs)
 
-        lastAction = .bulkSorted(
+        pushUndo(.bulkSorted(
             addedByAlbum: addedIDs.isEmpty ? [:] : [albumID: addedIDs],
             removedByAlbum: [:],
             removedFromQueue: removedIDs
-        )
+        ))
         Haptics.success()
         refreshCurrent()
     }
@@ -684,7 +692,7 @@ final class SortSessionViewModel {
         if index >= queue.count { index = max(0, queue.count - 1) }
         bulkSelectedIDs = []
 
-        lastAction = .bulkSkipped(localIDs: selected)
+        pushUndo(.bulkSkipped(localIDs: selected))
         Haptics.swipe()
         refreshCurrent()
     }
@@ -707,7 +715,7 @@ final class SortSessionViewModel {
         if index >= queue.count { index = max(0, queue.count - 1) }
         bulkSelectedIDs = []
 
-        lastAction = .bulkDeleted(localIDs: selected)
+        pushUndo(.bulkDeleted(localIDs: selected))
         Haptics.warning()
         refreshCurrent()
     }
@@ -728,11 +736,7 @@ final class SortSessionViewModel {
 
     // MARK: - Bulk undo
 
-    private func undoBulkSort() async {
-        guard case .bulkSorted(let addedByAlbum, let removedByAlbum, let removedFromQueue) = lastAction else {
-            return
-        }
-
+    private func undoBulkSort(addedByAlbum: [String: [String]], removedByAlbum: [String: [String]], removedFromQueue: [String]) async {
         for (albumID, photoIDs) in addedByAlbum {
             guard let collection = AlbumService.collection(for: albumID) else { continue }
             for id in photoIDs {
@@ -763,12 +767,10 @@ final class SortSessionViewModel {
             }
         }
 
-        lastAction = nil
         refreshCurrent()
     }
 
-    private func undoBulkSkip() async {
-        guard case .bulkSkipped(let ids) = lastAction else { return }
+    private func undoBulkSkip(ids: [String]) async {
         for id in ids {
             if let row = context.skips.first(where: { $0.assetLocalID == id }) {
                 modelContext.delete(row)
@@ -781,12 +783,10 @@ final class SortSessionViewModel {
                 queue.insert(id, at: min(index, queue.count))
             }
         }
-        lastAction = nil
         refreshCurrent()
     }
 
-    private func undoBulkDelete() async {
-        guard case .bulkDeleted(let ids) = lastAction else { return }
+    private func undoBulkDelete(ids: [String]) async {
         for id in ids {
             if let row = context.pendingDeletes.first(where: { $0.assetLocalID == id }) {
                 modelContext.delete(row)
@@ -799,7 +799,6 @@ final class SortSessionViewModel {
                 queue.insert(id, at: min(index, queue.count))
             }
         }
-        lastAction = nil
         refreshCurrent()
     }
 
@@ -827,19 +826,17 @@ final class SortSessionViewModel {
         skip.context = context
         modelContext.insert(skip)
         try? modelContext.save()
-        lastAction = .skipped(localID: id)
+        pushUndo(.skipped(localID: id))
         Haptics.swipe()
         advance(removingCurrent: true)
     }
 
-    func undoSkip() async {
-        guard case .skipped(let id) = lastAction else { return }
+    private func undoSkip(id: String) async {
         if let row = context.skips.first(where: { $0.assetLocalID == id }) {
             modelContext.delete(row)
             try? modelContext.save()
         }
         queue.insert(id, at: index)
-        lastAction = nil
         refreshCurrent()
     }
 
@@ -852,47 +849,36 @@ final class SortSessionViewModel {
         pd.context = context
         modelContext.insert(pd)
         try? modelContext.save()
-        lastAction = .queuedDelete(localID: id)
+        pushUndo(.queuedDelete(localID: id))
         Haptics.warning()
         advance(removingCurrent: true)
     }
 
-    func undoQueueDelete() async {
-        guard case .queuedDelete(let id) = lastAction else { return }
+    private func undoQueueDelete(id: String) async {
         if let row = context.pendingDeletes.first(where: { $0.assetLocalID == id }) {
             modelContext.delete(row)
             try? modelContext.save()
         }
         queue.insert(id, at: index)
-        lastAction = nil
         refreshCurrent()
     }
 
     // MARK: - Undo (sort)
 
-    func undoSort() async {
-        guard case .sorted(let id, let albumID) = lastAction else { return }
+    private func undoSort(id: String, albumID: String) async {
         guard let asset = AlbumService.asset(for: id),
-              let collection = AlbumService.collection(for: albumID) else {
-            lastAction = nil
-            return
-        }
+              let collection = AlbumService.collection(for: albumID) else { return }
         do {
             try await AlbumService.remove(asset, from: collection, assumeMember: true)
             evaluator.noteRemoved(asset: id, from: albumID)
             applyLocalMembershipChange(albumID: albumID, delta: -1)
         } catch {}
         queue.insert(id, at: index)
-        lastAction = nil
         refreshCurrent()
     }
 
-    func undoSortMulti() async {
-        guard case .sortedMulti(let id, let adds, let removes) = lastAction else { return }
-        guard let asset = AlbumService.asset(for: id) else {
-            lastAction = nil
-            return
-        }
+    private func undoSortMulti(id: String, adds: [String], removes: [String]) async {
+        guard let asset = AlbumService.asset(for: id) else { return }
         for albumID in adds {
             guard let collection = AlbumService.collection(for: albumID) else { continue }
             do {
@@ -910,20 +896,26 @@ final class SortSessionViewModel {
             } catch {}
         }
         queue.insert(id, at: index)
-        lastAction = nil
         refreshCurrent()
     }
 
     func undo() async {
-        switch lastAction {
-        case .sorted: await undoSort()
-        case .sortedMulti: await undoSortMulti()
-        case .skipped: await undoSkip()
-        case .queuedDelete: await undoQueueDelete()
-        case .bulkSorted: await undoBulkSort()
-        case .bulkSkipped: await undoBulkSkip()
-        case .bulkDeleted: await undoBulkDelete()
-        case nil: break
+        guard let action = undoStack.popLast() else { return }
+        switch action {
+        case .sorted(let id, let albumID):
+            await undoSort(id: id, albumID: albumID)
+        case .sortedMulti(let id, let adds, let removes):
+            await undoSortMulti(id: id, adds: adds, removes: removes)
+        case .skipped(let id):
+            await undoSkip(id: id)
+        case .queuedDelete(let id):
+            await undoQueueDelete(id: id)
+        case .bulkSorted(let added, let removed, let removedFromQueue):
+            await undoBulkSort(addedByAlbum: added, removedByAlbum: removed, removedFromQueue: removedFromQueue)
+        case .bulkSkipped(let ids):
+            await undoBulkSkip(ids: ids)
+        case .bulkDeleted(let ids):
+            await undoBulkDelete(ids: ids)
         }
     }
 
