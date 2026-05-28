@@ -17,8 +17,6 @@ struct SortSessionView: View {
     @Environment(PhotoLibrary.self) private var library
 
     @State private var vm: SortSessionViewModel?
-    @State private var showUndoToast = false
-    @State private var undoTimer: Task<Void, Never>?
     @State private var showingContextEditor = false
     @State private var columnCount = 3
     @State private var hasAppeared = false
@@ -187,28 +185,19 @@ struct SortSessionView: View {
             // carousel or progress header, and the album grid diffs on its own.
             ControlBarView(
                 vm: vm,
-                columnCount: $columnCount,
-                onToast: showToast,
-                onHideToast: { showUndoToast = false }
+                columnCount: $columnCount
             )
 
             AlbumListView(
                 vm: vm,
                 columnCount: columnCount,
-                bottomSafeInset: bottomSafeInset,
-                onToast: showToast
+                bottomSafeInset: bottomSafeInset
             )
         }
         // No bottom padding: the album list extends to the screen edge and its
         // content inset respects the home indicator. No top padding in bulk
         // mode so the grid sits flush against the nav bar.
         .padding(.top, vm.isBulkMode ? 0 : 4)
-        .overlay(alignment: .bottom) {
-            if showUndoToast, let action = vm.lastAction {
-                undoToast(action: action, vm: vm)
-                    .padding(.bottom, 16)
-            }
-        }
         .alert(
             "No Destination Album",
             isPresented: Binding(
@@ -227,55 +216,6 @@ struct SortSessionView: View {
         }
     }
 
-    // MARK: - Undo toast
-
-    private func showToast() {
-        showUndoToast = true
-        undoTimer?.cancel()
-        undoTimer = Task {
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            if !Task.isCancelled {
-                showUndoToast = false
-            }
-        }
-    }
-
-    private func undoToast(action: SortSessionViewModel.SortAction, vm: SortSessionViewModel) -> some View {
-        let label: String = {
-            switch action {
-            case .sorted: return "Sorted"
-            case .sortedMulti: return "Sorted"
-            case .skipped: return "Skipped"
-            case .queuedDelete: return "Queued for deletion"
-            case .bulkSorted(_, _, let removed):
-                return "Sorted \(removed.count) photo\(removed.count == 1 ? "" : "s")"
-            case .bulkSkipped(let ids):
-                return "Skipped \(ids.count) photo\(ids.count == 1 ? "" : "s")"
-            case .bulkDeleted(let ids):
-                return "Queued \(ids.count) for deletion"
-            }
-        }()
-        return HStack {
-            Text(label)
-            Spacer()
-            Button("Undo") {
-                Task {
-                    await vm.undo()
-                    if vm.canUndo {
-                        showToast()
-                    } else {
-                        showUndoToast = false
-                    }
-                }
-            }
-            .bold()
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.ultraThinMaterial, in: Capsule())
-        .padding(.horizontal, 24)
-        .transition(.move(edge: .bottom).combined(with: .opacity))
-    }
 }
 
 // MARK: - Media region
@@ -450,14 +390,12 @@ private struct MediaRegionView: View {
 private struct ControlBarView: View {
     let vm: SortSessionViewModel
     @Binding var columnCount: Int
-    let onToast: () -> Void
-    let onHideToast: () -> Void
 
     var body: some View {
         let bulkNoSelection = vm.isBulkMode && vm.bulkSelectedIDs.isEmpty
         HStack {
             Button {
-                Task { await vm.undo(); onHideToast() }
+                Task { await vm.undo() }
             } label: {
                 Image(systemName: "arrow.uturn.backward")
                     .frame(width: 44, height: 36)
@@ -468,9 +406,9 @@ private struct ControlBarView: View {
 
             Button {
                 if vm.isBulkMode {
-                    Task { await vm.bulkQueueDelete(); onToast() }
+                    Task { await vm.bulkQueueDelete() }
                 } else {
-                    Task { await vm.queueDelete(); onToast() }
+                    Task { await vm.queueDelete() }
                 }
             } label: {
                 Image(systemName: "trash")
@@ -483,9 +421,9 @@ private struct ControlBarView: View {
 
             Button {
                 if vm.isBulkMode {
-                    Task { await vm.bulkSkip(); onToast() }
+                    Task { await vm.bulkSkip() }
                 } else {
-                    Task { await vm.skip(); onToast() }
+                    Task { await vm.skip() }
                 }
             } label: {
                 Image(systemName: "arrow.right.to.line")
@@ -534,11 +472,7 @@ private struct ControlBarView: View {
 
             Button {
                 if vm.isMultiSelectActive {
-                    Task {
-                        await vm.deactivateMultiSelect()
-                        if case .sortedMulti = vm.lastAction { onToast() }
-                        if case .bulkSorted = vm.lastAction { onToast() }
-                    }
+                    Task { await vm.deactivateMultiSelect() }
                 } else {
                     Task { await vm.activateMultiSelect() }
                 }
@@ -561,7 +495,6 @@ private struct AlbumListView: View {
     let vm: SortSessionViewModel
     let columnCount: Int
     let bottomSafeInset: CGFloat
-    let onToast: () -> Void
 
     @State private var viewingAlbum: AlbumSheetItem?
 
@@ -581,15 +514,9 @@ private struct AlbumListView: View {
                     let isMember = memberIDs.contains(info.id)
                     Button {
                         if bulkDirect {
-                            Task {
-                                await vm.bulkSortToAlbum(info.id)
-                                if case .bulkSorted = vm.lastAction { onToast() }
-                            }
+                            Task { await vm.bulkSortToAlbum(info.id) }
                         } else {
-                            Task {
-                                await vm.toggleAlbum(info.id)
-                                if case .sorted = vm.lastAction { onToast() }
-                            }
+                            Task { await vm.toggleAlbum(info.id) }
                         }
                     } label: {
                         AlbumGridCell(
@@ -612,10 +539,7 @@ private struct AlbumListView: View {
                     let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
                     Button {
                         if bulkDirect {
-                            Task {
-                                await vm.bulkSortToAlbum(info.id)
-                                if case .bulkSorted = vm.lastAction { onToast() }
-                            }
+                            Task { await vm.bulkSortToAlbum(info.id) }
                         } else {
                             Task {
                                 if !vm.isMultiSelectActive {
@@ -645,10 +569,7 @@ private struct AlbumListView: View {
                 ForEach(extras, id: \.id) { info in
                     let isMember = memberIDs.contains(info.id)
                     Button {
-                        Task {
-                            await vm.toggleAlbum(info.id)
-                            if case .sorted = vm.lastAction { onToast() }
-                        }
+                        Task { await vm.toggleAlbum(info.id) }
                     } label: {
                         AlbumGridCell(
                             albumID: info.id,
