@@ -202,6 +202,57 @@ final class ImageLoader {
         })
     }
 
+    // MARK: - Cached + cancellable thumbnail
+
+    /// Nonisolated thumbnail load with built-in cache and cancellation.
+    /// Runs entirely off the main actor — the PHCachingImageManager serialises
+    /// internally. Cancelling the calling task cancels the underlying PhotoKit
+    /// request so fast-scrolling cells don't pile up orphaned JPEG decodes.
+    nonisolated func loadCachedThumbnail(
+        for asset: PHAsset,
+        targetSize: CGSize
+    ) async -> UIImage? {
+        let key = Self.thumbKey(asset.localIdentifier, targetSize)
+        if let cached = thumbnailCache.object(forKey: key) { return cached }
+        guard !Task.isCancelled else { return nil }
+
+        let mgr = self.manager
+        let opts = self.thumbnailOptions
+        let cache = self.thumbnailCache
+
+        final class Holder: @unchecked Sendable {
+            var requestID: PHImageRequestID?
+            var resumed = false
+            var cancelled = false
+        }
+        let holder = Holder()
+
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { cont in
+                if holder.cancelled {
+                    cont.resume(returning: nil)
+                    return
+                }
+                let id = mgr.requestImage(
+                    for: asset,
+                    targetSize: targetSize,
+                    contentMode: .aspectFill,
+                    options: opts
+                ) { image, _ in
+                    guard !holder.resumed else { return }
+                    holder.resumed = true
+                    if let image { cache.setObject(image, forKey: key) }
+                    cont.resume(returning: image)
+                }
+                holder.requestID = id
+                if holder.cancelled { mgr.cancelImageRequest(id) }
+            }
+        } onCancel: {
+            holder.cancelled = true
+            if let id = holder.requestID { mgr.cancelImageRequest(id) }
+        }
+    }
+
     // MARK: - Animated image (GIF)
 
     /// Load the raw image data for an animated asset and decode it into an
