@@ -523,8 +523,7 @@ private struct AlbumListView: View {
                             albumID: info.id,
                             title: info.title,
                             count: info.assetCount,
-                            isMember: bulkDirect ? false : isMember,
-                            refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
+                            isMember: bulkDirect ? false : isMember
                         )
                     }
                     .buttonStyle(.plain)
@@ -553,8 +552,7 @@ private struct AlbumListView: View {
                             albumID: info.id,
                             title: info.title,
                             count: info.assetCount,
-                            isMember: bulkDirect ? false : isMember,
-                            refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
+                            isMember: bulkDirect ? false : isMember
                         )
                         .opacity(isMember ? 1 : 0.6)
                     }
@@ -575,8 +573,7 @@ private struct AlbumListView: View {
                             albumID: info.id,
                             title: info.title,
                             count: info.assetCount,
-                            isMember: isMember,
-                            refreshTrigger: vm.albumRefreshVersions[info.id] ?? 0
+                            isMember: isMember
                         )
                         .opacity(isMember ? 1 : 0.6)
                     }
@@ -590,8 +587,8 @@ private struct AlbumListView: View {
                 }
             }
             .padding(.horizontal)
-            .animation(.easeInOut(duration: 0.25), value: infos.map(\.id))
-            .animation(.easeInOut(duration: 0.25), value: vm.pinnedAlbumInfos.map(\.id))
+            .animation(.easeInOut(duration: 0.25), value: Set(infos.map(\.id)))
+            .animation(.easeInOut(duration: 0.25), value: Set(vm.pinnedAlbumInfos.map(\.id)))
             .animation(.easeInOut(duration: 0.25), value: vm.extraAlbumIDs)
             .animation(.easeInOut(duration: 0.25), value: vm.isMultiSelectActive)
         }

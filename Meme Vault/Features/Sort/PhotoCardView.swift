@@ -181,8 +181,12 @@ private struct PhotoPage: View {
         backdrop = nil
         animatedImage = nil
         phase = .loading
-        guard let asset = AlbumService.asset(for: assetID) else {
-            phase = .missing
+        let id = assetID
+        let asset = await Task.detached(priority: .userInitiated) {
+            AlbumService.asset(for: id)
+        }.value
+        guard !Task.isCancelled, let asset else {
+            if !Task.isCancelled { phase = .missing }
             return
         }
         kind = Self.mediaKind(for: asset)

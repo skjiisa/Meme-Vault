@@ -329,9 +329,15 @@ final class ImageLoader {
 
         let newIDs = assetIDs.filter { cachedWindow[$0] == nil }
         if !newIDs.isEmpty {
-            let fetched = AlbumService.assets(for: newIDs)
-            manager.startCachingImages(for: fetched, targetSize: targetSize, contentMode: .aspectFit, options: options)
-            for asset in fetched { cachedWindow[asset.localIdentifier] = asset }
+            let mgr = self.manager
+            let opts = self.options
+            Task.detached(priority: .userInitiated) { [self] in
+                let fetched = AlbumService.assets(for: newIDs)
+                mgr.startCachingImages(for: fetched, targetSize: targetSize, contentMode: .aspectFit, options: opts)
+                await MainActor.run {
+                    for asset in fetched { self.cachedWindow[asset.localIdentifier] = asset }
+                }
+            }
         }
     }
 

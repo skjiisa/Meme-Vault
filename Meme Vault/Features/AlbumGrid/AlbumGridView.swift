@@ -18,7 +18,6 @@ struct AlbumGridCell: View {
     let title: String
     let count: Int
     var isMember: Bool = false
-    var refreshTrigger: Int = 0
 
     @State private var thumbnails: [AlbumThumbnail] = []
 
@@ -88,13 +87,8 @@ struct AlbumGridCell: View {
                 thumbnails = await loadThumbnails()
             }
         }
-        .onChange(of: refreshTrigger) {
-            Task {
-                let updated = await loadThumbnails()
-                withAnimation(.easeInOut(duration: 0.35)) {
-                    thumbnails = updated
-                }
-            }
+        .onChange(of: count) {
+            Task { thumbnails = await loadThumbnails() }
         }
     }
 
