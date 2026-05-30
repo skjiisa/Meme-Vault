@@ -20,9 +20,7 @@ struct SortSessionView: View {
     @State private var showingContextEditor = false
     @State private var columnCount = 3
     @State private var hasAppeared = false
-    @State private var topSafeInset: CGFloat = 0
     @State private var bottomSafeInset: CGFloat = 0
-    @Namespace private var thumbnailNamespace
 
     private var columnCountKey: String {
         "albumGridColumns_\(context.uuid.uuidString)"
@@ -42,14 +40,11 @@ struct SortSessionView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        // The content sits between the nav bar and the home indicator; the grid
-        // and album list extend under those edges and re-add these insets as
-        // content margins. The top inset is the content's global offset (the
-        // nav bar isn't surfaced as a safe-area inset on the content). The
-        // bottom inset is read from the safe area directly so it stays correct
-        // even though the album list extends under the home indicator — reading
-        // the content's own maxY would just report the extended (screen) edge.
-        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { topSafeInset = $0 }
+        // The album list extends under the home indicator and re-adds this inset
+        // as a content margin. The bottom inset is read from the safe area
+        // directly so it stays correct even though the list extends under the
+        // home indicator — reading the content's own maxY would just report the
+        // extended (screen) edge.
         .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.bottom } action: { bottomSafeInset = $0 }
         .navigationTitle(context.name.isEmpty ? "Sort" : context.name)
         .navigationBarTitleDisplayMode(.inline)
@@ -156,29 +151,17 @@ struct SortSessionView: View {
                 .padding(.horizontal)
             }
 
-            // Resizable media region (browse card or selection grid) plus its
-            // resize grabber, extracted into a child view that owns photoHeight.
-            // Dragging the grabber then re-evaluates only that subtree, leaving
-            // the album grid, control bar, and queue strip — siblings here —
-            // out of the per-frame invalidation scope.
+            // Resizable media region — a single morphing collection view that is
+            // the strip in browse mode and the multi-select grid in bulk mode,
+            // with the PhotoCardView overlaid in browse mode — plus its resize
+            // grabber. Extracted into a child view that owns photoHeight so
+            // dragging the grabber re-evaluates only that subtree, leaving the
+            // album grid and control bar (siblings here) out of the per-frame
+            // invalidation scope.
             MediaRegionView(
                 vm: vm,
-                namespace: thumbnailNamespace,
-                topSafeInset: topSafeInset,
                 photoHeightKey: photoHeightKey
             )
-
-            // Browse mode keeps the horizontal queue strip below the grabber.
-            if !vm.isBulkMode {
-                QueueThumbnailsView(
-                    assetIDs: vm.queue,
-                    isBulkMode: false,
-                    currentID: vm.currentAssetID,
-                    selectedIDs: vm.bulkSelectedIDs,
-                    onTap: { vm.showAsset(id: $0) },
-                    namespace: thumbnailNamespace
-                )
-            }
 
             // Control bar and album grid are extracted into their own views so
             // their observation is scoped: a favorite toggle (read only by the
@@ -221,17 +204,17 @@ struct SortSessionView: View {
 
 // MARK: - Media region
 
-/// The resizable media region — the browse card or the bulk-selection grid —
-/// plus the resize grabber that drives its height. `photoHeight` lives here
-/// rather than in `SortSessionView` so a resize drag re-evaluates only this
-/// subtree; the album grid, control bar, and queue strip are siblings in the
-/// parent and stay out of the per-frame invalidation scope. Identity is stable
-/// across a bulk-mode toggle (the parent always builds this view in the same
-/// slot), so the region keeps its size when switching modes.
+/// The resizable media region. It stacks the `MorphingThumbnailGrid` (which is
+/// the horizontal strip in browse mode and the multi-select grid in bulk mode)
+/// with the `PhotoCardView` overlaid in browse mode, plus the resize grabber that
+/// drives its height. `photoHeight` lives here rather than in `SortSessionView`
+/// so a resize drag re-evaluates only this subtree; the album grid and control
+/// bar are siblings in the parent and stay out of the per-frame invalidation
+/// scope. Identity is stable across a bulk-mode toggle (the parent always builds
+/// this view in the same slot), so the region keeps its size when switching
+/// modes and the collection view morphs in place rather than being rebuilt.
 private struct MediaRegionView: View {
     let vm: SortSessionViewModel
-    let namespace: Namespace.ID
-    let topSafeInset: CGFloat
     let photoHeightKey: String
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -248,25 +231,39 @@ private struct MediaRegionView: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            if vm.isBulkMode {
-                // The grid extends up under the translucent nav bar; its
-                // ScrollView re-adds a content inset equal to the consumed
-                // safe area, so resting content stays below the bar while
-                // scrolling reveals it underneath. The selection count is a
-                // sibling in the ZStack (not inside the safe-area-ignoring
-                // grid), so it floats just below the bar.
-                ZStack(alignment: .topLeading) {
-                    QueueThumbnailsView(
-                        assetIDs: vm.queue,
-                        isBulkMode: true,
-                        currentID: vm.currentAssetID,
-                        selectedIDs: vm.bulkSelectedIDs,
-                        onTap: { vm.toggleBulkSelection($0) },
-                        namespace: namespace
-                    )
-                    .contentMargins(.top, topSafeInset)
-                    .ignoresSafeArea(.container, edges: .top)
+            // One collection view spans the whole region and morphs its cells
+            // between the strip (browse) and grid (bulk) layouts in place. In
+            // browse mode the PhotoCardView overlays the top, leaving the strip
+            // band exposed at the bottom; in bulk mode the grid fills the region
+            // and the selection count floats at the top.
+            ZStack(alignment: .topLeading) {
+                MorphingThumbnailGrid(
+                    assetIDs: vm.queue,
+                    isBulkMode: vm.isBulkMode,
+                    currentID: vm.currentAssetID,
+                    selectedIDs: vm.bulkSelectedIDs,
+                    onTap: { id in
+                        if vm.isBulkMode {
+                            vm.toggleBulkSelection(id)
+                        } else {
+                            vm.showAsset(id: id)
+                        }
+                    }
+                )
 
+                if !vm.isBulkMode {
+                    PhotoCardView(
+                        assetIDs: vm.queue,
+                        currentID: Binding(
+                            get: { vm.currentAssetID },
+                            set: { id in if let id { vm.showAsset(id: id) } }
+                        )
+                    )
+                    .frame(maxWidth: .infinity, alignment: .top)
+                    .frame(height: photoHeight - MorphingThumbnailGrid.stripBandHeight)
+                }
+
+                if vm.isBulkMode {
                     Text("\(vm.bulkSelectedIDs.count) selected")
                         .font(.caption.weight(.semibold))
                         .padding(.horizontal, 12)
@@ -275,18 +272,8 @@ private struct MediaRegionView: View {
                         .padding(.top, 8)
                         .padding(.leading, 8)
                 }
-                .frame(height: photoHeight)
-            } else {
-                PhotoCardView(
-                    assetIDs: vm.queue,
-                    currentID: Binding(
-                        get: { vm.currentAssetID },
-                        set: { id in if let id { vm.showAsset(id: id) } }
-                    )
-                )
-                .frame(height: photoHeight)
-                .transition(.blurReplace)
             }
+            .frame(height: photoHeight)
 
             // Resize grabber — drives photoHeight in both modes. The snap-to-
             // default notch only applies in browse mode; the grid has no
