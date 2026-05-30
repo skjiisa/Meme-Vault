@@ -46,7 +46,7 @@ struct PhotoCardView: View {
             .onAppear { updatePrefetchWindow(targetSize: pixelSize) }
             .onChange(of: currentID) { _, _ in updatePrefetchWindow(targetSize: pixelSize) }
             .onChange(of: assetIDs) { _, _ in updatePrefetchWindow(targetSize: pixelSize) }
-            .onDisappear { ImageLoader.shared.reset() }
+
         }
     }
 

@@ -102,6 +102,7 @@ struct SortSessionView: View {
             }
             hasAppeared = true
         }
+        .onDisappear { ImageLoader.shared.reset() }
         .onChange(of: columnCount) { _, newValue in
             UserDefaults.standard.set(newValue, forKey: columnCountKey)
         }
