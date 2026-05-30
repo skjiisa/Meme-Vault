@@ -35,9 +35,6 @@ final class SortSessionViewModel {
     /// Undo history stack (most recent action last). Capped at 50 entries.
     private(set) var undoStack: [SortAction] = []
 
-    /// Most recent action (top of undo stack), used by the toast UI.
-    var lastAction: SortAction? { undoStack.last }
-
     /// When true, album taps don't auto-advance.
     var isMultiSelectActive: Bool = false
 
@@ -63,11 +60,6 @@ final class SortSessionViewModel {
     /// Cached snapshot of pinned (non-destination) albums. Always visible in
     /// the sort grid with reduced opacity.
     private(set) var pinnedAlbumInfos: [AlbumInfo] = []
-
-    /// Per-album refresh versions. The album grid cell observes the version
-    /// for its own album only — so a tap on one album doesn't force every
-    /// other cell to reload its thumbnails.
-    private(set) var albumRefreshVersions: [String: Int] = [:]
 
     enum SortAction {
         case sorted(localID: String, albumID: String)
@@ -384,11 +376,7 @@ final class SortSessionViewModel {
         Haptics.tap()
     }
 
-    /// Patch cached album metadata after a successful add/remove. Bumps the
-    /// per-album refresh version (so only that one cell reloads thumbnails)
-    /// and updates the cached count locally.
     private func applyLocalMembershipChange(albumID: String, delta: Int) {
-        albumRefreshVersions[albumID, default: 0] &+= 1
         if let i = albumInfos.firstIndex(where: { $0.id == albumID }) {
             albumInfos[i] = albumInfos[i].adjustingCount(by: delta)
             if context.autoSortAlbumsByCount {
