@@ -15,15 +15,40 @@ struct SortSessionView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(PhotoLibrary.self) private var library
+    @Environment(\.displayScale) private var displayScale
 
     @State private var vm: SortSessionViewModel?
     @State private var showingContextEditor = false
     @State private var columnCount = 3
     @State private var hasAppeared = false
     @State private var bottomSafeInset: CGFloat = 0
+    /// Global Y of the content's top (≈ the nav bar's bottom edge). In bulk mode the
+    /// grid rests below this and scrolls up under the translucent nav bar.
+    @State private var topSafeInset: CGFloat = 0
+    /// Global Y of the media region's top (below the header). The bulk grid extends
+    /// up by this much so its frame reaches the screen top, under the nav bar.
+    @State private var regionTopInset: CGFloat = 0
     /// True for the duration of a bulk-mode transition: the carousel hides its own
     /// photo so the hero-zoom flight owns it, then the flight hands it back.
     @State private var heroForegroundSuppressed = false
+    /// Lets the toolbar read the bulk grid's top-visible photo when exiting, so the
+    /// carousel opens at the scroll position rather than where it was left.
+    @State private var bulkAnchor = BulkGridAnchor()
+    /// Display image pre-decoded for a scroll-anchored exit, so the hero zoom uses
+    /// the full-aspect image (fit→fill) rather than the square thumbnail. Kept
+    /// separate from `heroImage` so PhotoCardView's (asset, nil) report for the
+    /// freshly-activated anchor page can't clobber it; the flight prefers it.
+    @State private var preloadedHeroID: String?
+    @State private var preloadedHeroImage: UIImage?
+
+    /// In bulk mode the selection count lives in the nav bar (the grid scrolls
+    /// under the bar, so there's no room for an in-content header).
+    private var navTitle: String {
+        if let vm, vm.isBulkMode {
+            return "\(vm.bulkSelectedIDs.count) selected"
+        }
+        return context.name.isEmpty ? "Sort" : context.name
+    }
 
     private var columnCountKey: String {
         "albumGridColumns_\(context.uuid.uuidString)"
@@ -49,25 +74,20 @@ struct SortSessionView: View {
         // home indicator — reading the content's own maxY would just report the
         // extended (screen) edge.
         .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.bottom } action: { bottomSafeInset = $0 }
-        .navigationTitle(context.name.isEmpty ? "Sort" : context.name)
+        // The content's global top sits just under the nav bar; the bulk grid uses
+        // it to inset its resting content below the bar while extending under it.
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { topSafeInset = $0 }
+        .navigationTitle(navTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 12) {
                     if let vm {
                         Button {
-                            // Suppress the carousel's own photo for the whole
-                            // transition so the hero-zoom flight owns it; the
-                            // flight hands it back on completion. The card's backdrop
-                            // and peeking neighbors fade via its opacity (bound to
-                            // bulk mode), concurrent with the flight.
-                            heroForegroundSuppressed = true
-                            withAnimation(.easeInOut(duration: 0.3)) {
-                                if vm.isBulkMode {
-                                    vm.exitBulkMode()
-                                } else {
-                                    vm.enterBulkMode()
-                                }
+                            if vm.isBulkMode {
+                                exitBulkMode(vm: vm)
+                            } else {
+                                enterBulkMode(vm: vm)
                             }
                         } label: {
                             Image(systemName: vm.isBulkMode
@@ -112,6 +132,67 @@ struct SortSessionView: View {
         }
     }
 
+    // MARK: - Bulk mode toggle
+
+    private func enterBulkMode(vm: SortSessionViewModel) {
+        preloadedHeroID = nil
+        preloadedHeroImage = nil
+        // Suppress the carousel's own photo for the whole transition so the
+        // hero-zoom flight owns it; the flight hands it back on completion. The
+        // card's backdrop and peeking neighbors fade via its opacity (bound to bulk
+        // mode), concurrent with the flight.
+        heroForegroundSuppressed = true
+        withAnimation(.easeInOut(duration: 0.3)) { vm.enterBulkMode() }
+    }
+
+    /// Exit multi-select, opening the carousel at the first selected photo (in queue
+    /// order) — or, if nothing is selected, at the grid's scroll position. Before
+    /// flipping modes, pre-decode that photo's display image so the hero zoom uses
+    /// the full-aspect image (fit→fill) instead of the square thumbnail.
+    private func exitBulkMode(vm: SortSessionViewModel) {
+        let firstSelected = vm.queue.first { vm.bulkSelectedIDs.contains($0) }
+        guard let id = firstSelected ?? bulkAnchor.topVisibleID() else {
+            heroForegroundSuppressed = true
+            withAnimation(.easeInOut(duration: 0.3)) { vm.exitBulkMode() }
+            return
+        }
+        // Point the carousel at the anchor up front, without animation, so it
+        // doesn't visibly whip-scroll to the new page once it reappears — it jumps
+        // there (invisibly, behind the grid) while the display image decodes.
+        var noAnimation = Transaction()
+        noAnimation.disablesAnimations = true
+        withTransaction(noAnimation) { vm.showAsset(id: id) }
+        Task {
+            if let image = await preloadDisplayImage(for: id) {
+                preloadedHeroID = id
+                preloadedHeroImage = image
+            }
+            heroForegroundSuppressed = true
+            withAnimation(.easeInOut(duration: 0.3)) { vm.exitBulkMode() }
+        }
+    }
+
+    /// Decode the asset's display image at hero size, capped so a slow (e.g. iCloud)
+    /// fetch can't stall the exit — returns nil on timeout and the flight falls back
+    /// to the cached thumbnail.
+    private func preloadDisplayImage(for id: String) async -> UIImage? {
+        let side = 600 * displayScale
+        let target = CGSize(width: side, height: side)
+        return await withTaskGroup(of: UIImage?.self) { group in
+            group.addTask {
+                guard let asset = AlbumService.asset(for: id) else { return nil }
+                return await ImageLoader.shared.loadDisplayImage(for: asset, targetSize: target)
+            }
+            group.addTask {
+                try? await Task.sleep(for: .milliseconds(250))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+    }
+
     @ViewBuilder
     private func content(vm: SortSessionViewModel) -> some View {
         if vm.isLoading {
@@ -143,28 +224,23 @@ struct SortSessionView: View {
     @ViewBuilder
     private func sortContent(vm: SortSessionViewModel) -> some View {
         VStack(spacing: 6) {
-            // Header — always present so toggling bulk mode doesn't reflow the
-            // content below it. A browse-only header would shift the media region
-            // (and the in-flight hero zoom inside it) vertically mid-transition,
-            // desyncing the UIKit flight from the SwiftUI layout. Shows progress in
-            // browse and the selection count in bulk (no floating capsule).
+            // Header — always present (height reserved) so toggling bulk mode
+            // doesn't reflow the content below it; a shift would desync the in-flight
+            // hero zoom. Shows browse progress; in bulk it's hidden (the selection
+            // count is in the nav bar) and the grid scrolls up over its area.
             HStack {
-                if vm.isBulkMode {
-                    Text("\(vm.bulkSelectedIDs.count) selected")
-                        .font(.caption.weight(.semibold))
-                } else {
-                    Text(vm.progressText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Text(vm.progressText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Spacer()
-                if !vm.isBulkMode, vm.isSatisfied {
+                if vm.isSatisfied {
                     Label("Sorted", systemImage: "checkmark.circle.fill")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.green)
                 }
             }
             .padding(.horizontal)
+            .opacity(vm.isBulkMode ? 0 : 1)
 
             // Resizable media region — a single morphing collection view that is
             // the strip in browse mode and the multi-select grid in bulk mode,
@@ -176,8 +252,16 @@ struct SortSessionView: View {
             MediaRegionView(
                 vm: vm,
                 heroForegroundSuppressed: $heroForegroundSuppressed,
+                anchor: bulkAnchor,
+                preloadedHeroID: preloadedHeroID,
+                preloadedHeroImage: preloadedHeroImage,
+                topSafeInset: topSafeInset,
+                regionTopInset: regionTopInset,
                 photoHeightKey: photoHeightKey
             )
+            // The media region's global top — the bulk grid extends up by this much
+            // (to reach the screen top, under the nav bar).
+            .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { regionTopInset = $0 }
 
             // Control bar and album grid are extracted into their own views so
             // their observation is scoped: a favorite toggle (read only by the
@@ -236,6 +320,16 @@ private struct MediaRegionView: View {
     /// to false for a seamless handoff. Owned by `SortSessionView` and set true in
     /// the same action that toggles bulk mode (before the body commits).
     @Binding var heroForegroundSuppressed: Bool
+    let anchor: BulkGridAnchor
+    /// Pre-decoded full-aspect image for a scroll-anchored exit, with the asset it
+    /// belongs to. Preferred by the flight over `heroImage` so the anchor photo
+    /// zooms fit→fill even before PhotoCardView has loaded it.
+    let preloadedHeroID: String?
+    let preloadedHeroImage: UIImage?
+    /// Content-top / media-region-top global Ys; in bulk the grid extends up under
+    /// the nav bar by `regionTopInset` and rests `topSafeInset` below the top.
+    let topSafeInset: CGFloat
+    let regionTopInset: CGFloat
     let photoHeightKey: String
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -243,10 +337,13 @@ private struct MediaRegionView: View {
     @State private var photoHeight: CGFloat = 300
     @State private var dragStartHeight: CGFloat?
     @State private var wasInNotch = false
-    /// Latest decoded display image of the current hero photo, reported by
-    /// PhotoCardView. The hero-zoom flight uses it (full aspect) rather than the
-    /// cropped grid thumbnail, so it can morph aspect-fit → aspect-fill.
+    /// Latest decoded display image of the hero photo, reported by PhotoCardView,
+    /// and the asset it belongs to. The hero-zoom flight uses the image (full
+    /// aspect) rather than the cropped grid thumbnail — but only when `heroImageID`
+    /// still matches the current photo, so a scroll-anchored exit doesn't fly the
+    /// previous photo's image while the new one is still loading.
     @State private var heroImage: UIImage?
+    @State private var heroImageID: String?
     /// Top overlay hosting the hero-zoom flight image, so it draws above the
     /// PhotoCardView as that fades its backdrop and peeking neighbors out/in.
     @State private var flightLayer = FlightLayer()
@@ -257,21 +354,34 @@ private struct MediaRegionView: View {
     private let notchRadius: CGFloat = 30
     private let notchDamping: CGFloat = 0.25
 
+    /// The full-aspect image the hero-zoom flight should use for the current photo:
+    /// the pre-decoded anchor image when present (scroll-anchored exit), otherwise
+    /// PhotoCardView's reported image when it still matches the current photo.
+    private var effectiveHeroImage: UIImage? {
+        if preloadedHeroID == vm.currentAssetID, let image = preloadedHeroImage {
+            return image
+        }
+        return heroImageID == vm.currentAssetID ? heroImage : nil
+    }
+
     var body: some View {
         VStack(spacing: 6) {
             // One collection view spans the whole region and morphs its cells
             // between the strip (browse) and grid (bulk) layouts in place. In
             // browse mode the PhotoCardView overlays the top, leaving the strip
             // band exposed at the bottom; in bulk mode the grid fills the region
-            // and the selection count floats at the top.
+            // and extends up under the nav bar (the selection count is in the bar).
             ZStack(alignment: .topLeading) {
                 MorphingThumbnailGrid(
                     assetIDs: vm.queue,
                     isBulkMode: vm.isBulkMode,
                     currentID: vm.currentAssetID,
                     selectedIDs: vm.bulkSelectedIDs,
-                    heroImage: heroImage,
+                    heroImage: effectiveHeroImage,
                     flightLayer: flightLayer,
+                    anchor: anchor,
+                    topSafeInset: topSafeInset,
+                    regionTopInset: regionTopInset,
                     onTap: { id in
                         if vm.isBulkMode {
                             vm.toggleBulkSelection(id)
@@ -293,7 +403,10 @@ private struct MediaRegionView: View {
                         get: { vm.currentAssetID },
                         set: { id in if let id { vm.showAsset(id: id) } }
                     ),
-                    onActiveImage: { heroImage = $0 },
+                    onActiveImage: { id, image in
+                        heroImageID = id
+                        heroImage = image
+                    },
                     suppressForeground: heroForegroundSuppressed,
                     isForeground: !vm.isBulkMode
                 )
@@ -528,14 +641,13 @@ private struct AlbumListView: View {
         let extras = vm.extraAlbumInfos
         let memberIDs = Set(vm.memberships.filter(\.isMember).map(\.id))
         let bulkDirect = vm.isBulkMode && !vm.isMultiSelectActive
-        let bulkDisabled = bulkDirect && vm.bulkSelectedIDs.isEmpty
         ScrollView {
             LazyVGrid(columns: albumColumns, spacing: 8) {
                 ForEach(infos, id: \.id) { info in
                     let isMember = memberIDs.contains(info.id)
                     Button {
-                        if bulkDirect {
-                            Task { await vm.bulkSortToAlbum(info.id) }
+                        if vm.isBulkMode {
+                            Task { await vm.bulkAlbumTap(info.id) }
                         } else {
                             Task { await vm.toggleAlbum(info.id) }
                         }
@@ -548,7 +660,6 @@ private struct AlbumListView: View {
                         )
                     }
                     .buttonStyle(.plain)
-                    .disabled(bulkDisabled)
                     .contextMenu {
                         Button("View Contents", systemImage: "photo.on.rectangle") {
                             viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
@@ -558,8 +669,8 @@ private struct AlbumListView: View {
                 ForEach(vm.pinnedAlbumInfos, id: \.id) { info in
                     let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
                     Button {
-                        if bulkDirect {
-                            Task { await vm.bulkSortToAlbum(info.id) }
+                        if vm.isBulkMode {
+                            Task { await vm.bulkAlbumTap(info.id) }
                         } else {
                             Task {
                                 if !vm.isMultiSelectActive {
@@ -578,7 +689,6 @@ private struct AlbumListView: View {
                         .opacity(isMember ? 1 : 0.6)
                     }
                     .buttonStyle(.plain)
-                    .disabled(bulkDisabled)
                     .contextMenu {
                         Button("View Contents", systemImage: "photo.on.rectangle") {
                             viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
