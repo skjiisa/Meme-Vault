@@ -612,6 +612,20 @@ final class SortSessionViewModel {
         Haptics.tap()
     }
 
+    /// An album tap in bulk mode. With photos selected it sorts them straight to
+    /// the album; with nothing selected yet it enters destination multi-select and
+    /// pends the album, so you can pick destinations first, then the photos.
+    func bulkAlbumTap(_ albumID: String) async {
+        if !isMultiSelectActive && bulkSelectedIDs.isEmpty {
+            await activateMultiSelect()
+        }
+        if isMultiSelectActive {
+            await toggleAlbum(albumID)
+        } else {
+            await bulkSortToAlbum(albumID)
+        }
+    }
+
     func bulkSortToAlbum(_ albumID: String) async {
         let selected = bulkSelectedIDs
         guard !selected.isEmpty else { return }

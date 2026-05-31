@@ -641,14 +641,13 @@ private struct AlbumListView: View {
         let extras = vm.extraAlbumInfos
         let memberIDs = Set(vm.memberships.filter(\.isMember).map(\.id))
         let bulkDirect = vm.isBulkMode && !vm.isMultiSelectActive
-        let bulkDisabled = bulkDirect && vm.bulkSelectedIDs.isEmpty
         ScrollView {
             LazyVGrid(columns: albumColumns, spacing: 8) {
                 ForEach(infos, id: \.id) { info in
                     let isMember = memberIDs.contains(info.id)
                     Button {
-                        if bulkDirect {
-                            Task { await vm.bulkSortToAlbum(info.id) }
+                        if vm.isBulkMode {
+                            Task { await vm.bulkAlbumTap(info.id) }
                         } else {
                             Task { await vm.toggleAlbum(info.id) }
                         }
@@ -661,7 +660,6 @@ private struct AlbumListView: View {
                         )
                     }
                     .buttonStyle(.plain)
-                    .disabled(bulkDisabled)
                     .contextMenu {
                         Button("View Contents", systemImage: "photo.on.rectangle") {
                             viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
@@ -671,8 +669,8 @@ private struct AlbumListView: View {
                 ForEach(vm.pinnedAlbumInfos, id: \.id) { info in
                     let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
                     Button {
-                        if bulkDirect {
-                            Task { await vm.bulkSortToAlbum(info.id) }
+                        if vm.isBulkMode {
+                            Task { await vm.bulkAlbumTap(info.id) }
                         } else {
                             Task {
                                 if !vm.isMultiSelectActive {
@@ -691,7 +689,6 @@ private struct AlbumListView: View {
                         .opacity(isMember ? 1 : 0.6)
                     }
                     .buttonStyle(.plain)
-                    .disabled(bulkDisabled)
                     .contextMenu {
                         Button("View Contents", systemImage: "photo.on.rectangle") {
                             viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
