@@ -73,6 +73,12 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
     /// Reports the photo at the top of the grid's scroll position, so exiting
     /// multi-select can open the carousel there.
     let anchor: BulkGridAnchor
+    /// In bulk mode the collection view extends up by `regionTopInset` (so its frame
+    /// reaches the screen top, under the translucent nav bar) and insets its content
+    /// by `topSafeInset` (so resting rows stay just below the bar and scroll under
+    /// it). Both zero-effect in browse.
+    let topSafeInset: CGFloat
+    let regionTopInset: CGFloat
     let onTap: (String) -> Void
     /// Called when a flight finishes (the Bool is `entering` bulk), so the parent
     /// can hand the photo back to the carousel — unsuppressing its foreground for
@@ -137,20 +143,27 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
         }
 
         // A plain container so the transient flight image view can sit above the
-        // collection view without scrolling with its content.
+        // collection view without scrolling with its content. Doesn't clip, so the
+        // collection view can extend up out of its bounds under the nav bar.
         let container = UIView()
         container.backgroundColor = .clear
+        container.clipsToBounds = false
         container.addSubview(cv)
+        // The top constraint is adjusted (to a negative constant) in bulk mode so
+        // the collection view's frame extends up to the screen top, under the bar.
+        let cvTop = cv.topAnchor.constraint(equalTo: container.topAnchor)
         NSLayoutConstraint.activate([
             cv.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             cv.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            cv.topAnchor.constraint(equalTo: container.topAnchor),
+            cvTop,
             cv.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
         coord.collectionView = cv
         coord.container = container
+        coord.cvTopConstraint = cvTop
         coord.flightContainer = flightLayer.view
         anchor.topVisibleID = { [weak coord] in coord?.topVisibleAssetID() }
+        coord.applyBulkInsets(topSafeInset: topSafeInset, regionTopInset: regionTopInset)
 
         var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
         snapshot.appendSections([0])
@@ -172,6 +185,10 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
         coord.isBulkMode = isBulkMode
         coord.selectedIDs = selectedIDs
         coord.currentID = currentID
+
+        // Extend the grid up under the nav bar (bulk) / reset (browse). Applied
+        // before the mode-change layout + flight so they compute in the new frame.
+        coord.applyBulkInsets(topSafeInset: topSafeInset, regionTopInset: regionTopInset)
 
         // Queue contents changed (sort/skip/delete): re-apply the snapshot. Animate
         // the diff only when we're not also morphing modes, so the two animations
@@ -249,6 +266,9 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
         var dataSource: UICollectionViewDiffableDataSource<Int, String>!
         weak var collectionView: UICollectionView?
         weak var container: UIView?
+        /// cv.top == container.top + constant; made negative in bulk to extend the
+        /// collection view up under the nav bar.
+        weak var cvTopConstraint: NSLayoutConstraint?
         /// Top overlay the flight image is added to (above the fading hero).
         weak var flightContainer: UIView?
         var assetIDs: [String] = []
@@ -287,7 +307,8 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
         /// exiting multi-select to open the carousel at the current scroll position.
         func topVisibleAssetID() -> String? {
             guard isBulkMode, let cv = collectionView else { return nil }
-            let top = cv.contentOffset.y
+            // Top of the inset-safe content area (just below the nav bar in bulk).
+            let top = cv.contentOffset.y + cv.adjustedContentInset.top
             return cv.indexPathsForVisibleItems
                 .filter { (cv.layoutAttributesForItem(at: $0)?.frame.minY ?? -.greatestFiniteMagnitude) >= top - 1 }
                 .min()
@@ -299,6 +320,23 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
                   let idx = assetIDs.firstIndex(of: id) else { return }
             cv.scrollToItem(at: IndexPath(item: idx, section: 0),
                             at: .centeredHorizontally, animated: animated)
+        }
+
+        /// In bulk, extend the collection view up under the nav bar (negative top
+        /// constraint) and inset its content below the bar; reset in browse. Called
+        /// each update — idempotent when nothing changed.
+        func applyBulkInsets(topSafeInset: CGFloat, regionTopInset: CGFloat) {
+            guard let cv = collectionView else { return }
+            let topConstant = isBulkMode ? -regionTopInset : 0
+            if cvTopConstraint?.constant != topConstant {
+                cvTopConstraint?.constant = topConstant
+                cv.superview?.layoutIfNeeded()   // apply the frame change now
+            }
+            let inset = isBulkMode ? topSafeInset : 0
+            if cv.contentInset.top != inset {
+                cv.contentInset.top = inset
+                cv.verticalScrollIndicatorInsets.top = inset
+            }
         }
 
         /// Scroll the grid so the current item sits at the top — the position
@@ -350,7 +388,11 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
                 return
             }
 
-            let cellRect = attr.frame.offsetBy(dx: -cv.contentOffset.x, dy: -cv.contentOffset.y)
+            // Convert the cell's frame into the flight overlay's space — robust to
+            // the collection view extending past its container (under the nav bar in
+            // bulk), where a plain contentOffset subtraction would be wrong.
+            let flightHost = flightContainer ?? container
+            let cellRect = cv.convert(attr.frame, to: flightHost)
             // Match PhotoCardView's page rect — full width inset by its horizontal
             // margin, top region above the strip band — so the flight lands exactly
             // where the carousel shows the photo (seamless handoff).
@@ -386,9 +428,9 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
             fv.layer.cornerRadius = fromRadius
             fv.frame = fromRect
             // Add to the top overlay (coincident with the grid's bounds) so the
-            // flying photo is above the fading PhotoCardView; fall back to the
-            // grid container if the overlay isn't wired up.
-            (flightContainer ?? container).addSubview(fv)
+            // flying photo is above the fading PhotoCardView; falls back to the grid
+            // container if the overlay isn't wired up (same `flightHost` as cellRect).
+            flightHost.addSubview(fv)
             flightView = fv
 
             let corner = CABasicAnimation(keyPath: "cornerRadius")

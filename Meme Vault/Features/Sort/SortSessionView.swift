@@ -22,6 +22,12 @@ struct SortSessionView: View {
     @State private var columnCount = 3
     @State private var hasAppeared = false
     @State private var bottomSafeInset: CGFloat = 0
+    /// Global Y of the content's top (≈ the nav bar's bottom edge). In bulk mode the
+    /// grid rests below this and scrolls up under the translucent nav bar.
+    @State private var topSafeInset: CGFloat = 0
+    /// Global Y of the media region's top (below the header). The bulk grid extends
+    /// up by this much so its frame reaches the screen top, under the nav bar.
+    @State private var regionTopInset: CGFloat = 0
     /// True for the duration of a bulk-mode transition: the carousel hides its own
     /// photo so the hero-zoom flight owns it, then the flight hands it back.
     @State private var heroForegroundSuppressed = false
@@ -34,6 +40,15 @@ struct SortSessionView: View {
     /// freshly-activated anchor page can't clobber it; the flight prefers it.
     @State private var preloadedHeroID: String?
     @State private var preloadedHeroImage: UIImage?
+
+    /// In bulk mode the selection count lives in the nav bar (the grid scrolls
+    /// under the bar, so there's no room for an in-content header).
+    private var navTitle: String {
+        if let vm, vm.isBulkMode {
+            return "\(vm.bulkSelectedIDs.count) selected"
+        }
+        return context.name.isEmpty ? "Sort" : context.name
+    }
 
     private var columnCountKey: String {
         "albumGridColumns_\(context.uuid.uuidString)"
@@ -59,7 +74,10 @@ struct SortSessionView: View {
         // home indicator — reading the content's own maxY would just report the
         // extended (screen) edge.
         .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.bottom } action: { bottomSafeInset = $0 }
-        .navigationTitle(context.name.isEmpty ? "Sort" : context.name)
+        // The content's global top sits just under the nav bar; the bulk grid uses
+        // it to inset its resting content below the bar while extending under it.
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { topSafeInset = $0 }
+        .navigationTitle(navTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -204,28 +222,23 @@ struct SortSessionView: View {
     @ViewBuilder
     private func sortContent(vm: SortSessionViewModel) -> some View {
         VStack(spacing: 6) {
-            // Header — always present so toggling bulk mode doesn't reflow the
-            // content below it. A browse-only header would shift the media region
-            // (and the in-flight hero zoom inside it) vertically mid-transition,
-            // desyncing the UIKit flight from the SwiftUI layout. Shows progress in
-            // browse and the selection count in bulk (no floating capsule).
+            // Header — always present (height reserved) so toggling bulk mode
+            // doesn't reflow the content below it; a shift would desync the in-flight
+            // hero zoom. Shows browse progress; in bulk it's hidden (the selection
+            // count is in the nav bar) and the grid scrolls up over its area.
             HStack {
-                if vm.isBulkMode {
-                    Text("\(vm.bulkSelectedIDs.count) selected")
-                        .font(.caption.weight(.semibold))
-                } else {
-                    Text(vm.progressText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Text(vm.progressText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Spacer()
-                if !vm.isBulkMode, vm.isSatisfied {
+                if vm.isSatisfied {
                     Label("Sorted", systemImage: "checkmark.circle.fill")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.green)
                 }
             }
             .padding(.horizontal)
+            .opacity(vm.isBulkMode ? 0 : 1)
 
             // Resizable media region — a single morphing collection view that is
             // the strip in browse mode and the multi-select grid in bulk mode,
@@ -240,8 +253,13 @@ struct SortSessionView: View {
                 anchor: bulkAnchor,
                 preloadedHeroID: preloadedHeroID,
                 preloadedHeroImage: preloadedHeroImage,
+                topSafeInset: topSafeInset,
+                regionTopInset: regionTopInset,
                 photoHeightKey: photoHeightKey
             )
+            // The media region's global top — the bulk grid extends up by this much
+            // (to reach the screen top, under the nav bar).
+            .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { regionTopInset = $0 }
 
             // Control bar and album grid are extracted into their own views so
             // their observation is scoped: a favorite toggle (read only by the
@@ -306,6 +324,10 @@ private struct MediaRegionView: View {
     /// zooms fit→fill even before PhotoCardView has loaded it.
     let preloadedHeroID: String?
     let preloadedHeroImage: UIImage?
+    /// Content-top / media-region-top global Ys; in bulk the grid extends up under
+    /// the nav bar by `regionTopInset` and rests `topSafeInset` below the top.
+    let topSafeInset: CGFloat
+    let regionTopInset: CGFloat
     let photoHeightKey: String
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -346,7 +368,7 @@ private struct MediaRegionView: View {
             // between the strip (browse) and grid (bulk) layouts in place. In
             // browse mode the PhotoCardView overlays the top, leaving the strip
             // band exposed at the bottom; in bulk mode the grid fills the region
-            // and the selection count floats at the top.
+            // and extends up under the nav bar (the selection count is in the bar).
             ZStack(alignment: .topLeading) {
                 MorphingThumbnailGrid(
                     assetIDs: vm.queue,
@@ -356,6 +378,8 @@ private struct MediaRegionView: View {
                     heroImage: effectiveHeroImage,
                     flightLayer: flightLayer,
                     anchor: anchor,
+                    topSafeInset: topSafeInset,
+                    regionTopInset: regionTopInset,
                     onTap: { id in
                         if vm.isBulkMode {
                             vm.toggleBulkSelection(id)
