@@ -14,26 +14,66 @@
 //
 //  Morphing cells inside one collection view via a custom `UICollectionViewLayout`
 //  is GPU-composited and costs nothing in SwiftUI's graph, so it scales to any
-//  number of cells — and it unblocks the planned "tap a grid cell to focus it,
-//  surrounding cells morph into the strip" feature, which needs an arbitrarily
-//  large morph set.
+//  number of cells.
+//
+//  On a mode toggle the current photo additionally performs a *hero zoom*: a
+//  flight image view animates between the big `PhotoCardView` frame and the
+//  current asset's grid cell, so the hero appears to shrink into / expand out of
+//  the grid while every other cell does the ordinary strip↔grid morph. The hero
+//  itself stays a SwiftUI view (`PhotoCardView`); this view only borrows its
+//  thumbnail and frame for the flight and signals back (`onExpandComplete`) when
+//  the hero should reappear.
 //
 
 import SwiftUI
 import UIKit
 import Photos
 
+/// A transparent, non-interactive UIKit layer that sits on top of the media
+/// region and hosts the hero-zoom flight image view. It's separate from the grid
+/// so the flying photo draws *above* the fading `PhotoCardView` (backdrop +
+/// peeking neighbors) rather than being occluded by it. Shared by reference
+/// between `MorphingThumbnailGrid` (which adds the flight view) and
+/// `HeroFlightOverlay` (which mounts the layer in the SwiftUI hierarchy).
+final class FlightLayer {
+    let view: UIView = {
+        let v = UIView()
+        v.backgroundColor = .clear
+        v.isUserInteractionEnabled = false   // never intercept taps/scrolls
+        return v
+    }()
+}
+
+/// Mounts a `FlightLayer`'s view as the topmost child of the media region.
+struct HeroFlightOverlay: UIViewRepresentable {
+    let layer: FlightLayer
+    func makeUIView(context: Context) -> UIView { layer.view }
+    func updateUIView(_ uiView: UIView, context: Context) {}
+}
+
 struct MorphingThumbnailGrid: UIViewRepresentable {
     let assetIDs: [String]
     let isBulkMode: Bool
     let currentID: String?
     let selectedIDs: Set<String>
+    /// Full-aspect display image of the current hero photo, used as the zoom
+    /// flight image. The grid's own thumbnails are square-cropped, so they can't
+    /// represent the hero's aspect-fit (letterboxed) appearance; this can.
+    let heroImage: UIImage?
+    /// Top overlay that hosts the flight image so it draws above the fading hero.
+    let flightLayer: FlightLayer
     let onTap: (String) -> Void
+    /// Called when a flight finishes (the Bool is `entering` bulk), so the parent
+    /// can hand the photo back to the carousel — unsuppressing its foreground for
+    /// a seamless landing. Also called immediately when a flight is skipped (no
+    /// current cell on screen), so the carousel is never left suppressed.
+    var onFlightComplete: (Bool) -> Void = { _ in }
 
     @Environment(\.displayScale) private var displayScale
 
     /// Height of the strip band at the bottom of the media region in browse mode.
-    /// `MediaRegionView` sizes the `PhotoCardView` to leave this much room below.
+    /// `MediaRegionView` sizes the `PhotoCardView` to leave this much room below;
+    /// it's also the hero flight's vertical extent.
     static let stripBandHeight: CGFloat = 44
 
     // Strip + grid cells request the same 80pt thumbnail so a cell keeps its
@@ -48,13 +88,14 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
         Coordinator(onTap: onTap)
     }
 
-    func makeUIView(context: Context) -> UICollectionView {
+    func makeUIView(context: Context) -> UIView {
         let coord = context.coordinator
         coord.targetSize = targetSize
         coord.isBulkMode = isBulkMode
         coord.selectedIDs = selectedIDs
         coord.currentID = currentID
         coord.assetIDs = assetIDs
+        coord.heroImage = heroImage
 
         let layout = MorphLayout()
         layout.mode = isBulkMode ? .grid : .strip
@@ -67,6 +108,7 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
         cv.contentInsetAdjustmentBehavior = .never
         cv.delegate = coord
         cv.prefetchDataSource = coord
+        cv.translatesAutoresizingMaskIntoConstraints = false
 
         let registration = UICollectionView.CellRegistration<ThumbCell, String> { [weak coord] cell, _, id in
             guard let coord else { return }
@@ -75,24 +117,42 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
                 targetSize: coord.targetSize,
                 isBulk: coord.isBulkMode,
                 isSelected: coord.selectedIDs.contains(id),
-                isCurrent: id == coord.currentID
+                isCurrent: id == coord.currentID,
+                isHiddenForFlight: coord.flightHiddenID == id
             )
         }
         coord.dataSource = UICollectionViewDiffableDataSource(collectionView: cv) { cv, indexPath, id in
             cv.dequeueConfiguredReusableCell(using: registration, for: indexPath, item: id)
         }
 
+        // A plain container so the transient flight image view can sit above the
+        // collection view without scrolling with its content.
+        let container = UIView()
+        container.backgroundColor = .clear
+        container.addSubview(cv)
+        NSLayoutConstraint.activate([
+            cv.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            cv.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            cv.topAnchor.constraint(equalTo: container.topAnchor),
+            cv.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        coord.collectionView = cv
+        coord.container = container
+        coord.flightContainer = flightLayer.view
+
         var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
         snapshot.appendSections([0])
         snapshot.appendItems(assetIDs)
         coord.dataSource.apply(snapshot, animatingDifferences: false)
-        return cv
+        return container
     }
 
-    func updateUIView(_ cv: UICollectionView, context: Context) {
+    func updateUIView(_ container: UIView, context: Context) {
         let coord = context.coordinator
+        guard let cv = coord.collectionView else { return }
         coord.targetSize = targetSize
         coord.onTap = onTap
+        coord.heroImage = heroImage
 
         let modeChanged = coord.isBulkMode != isBulkMode
         let prevSelected = coord.selectedIDs
@@ -114,17 +174,36 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
 
         if modeChanged {
             cv.showsVerticalScrollIndicator = isBulkMode
-            let layout = MorphLayout()
-            layout.mode = isBulkMode ? .grid : .strip
-            // Animated layout swap interpolates each visible cell's frame from its
-            // old (strip/grid) attributes to its new ones — the morph.
-            cv.setCollectionViewLayout(layout, animated: true)
-            // Cells swap their overlay (strip current-border ↔ grid checkmark);
-            // reconfigure keeps the decoded image and only re-runs configure().
-            reconfigure(coord, ids: assetIDs)
             if isBulkMode {
+                // Shrink: lay the grid out first (so the destination cell frame is
+                // known), then fly the hero down into it while the other cells
+                // morph strip→grid.
+                let layout = MorphLayout()
+                layout.mode = .grid
+                cv.setCollectionViewLayout(layout, animated: true)
                 cv.setContentOffset(.zero, animated: false)
+                coord.reconfigure(assetIDs)
+                coord.runHeroFlight(
+                    entering: true,
+                    currentID: currentID,
+                    targetSize: targetSize,
+                    stripBandHeight: Self.stripBandHeight,
+                    onFlightComplete: onFlightComplete
+                )
             } else {
+                // Expand: capture the current cell's grid frame *before* morphing
+                // to the strip, fly it up to the hero, then morph the rest.
+                coord.runHeroFlight(
+                    entering: false,
+                    currentID: currentID,
+                    targetSize: targetSize,
+                    stripBandHeight: Self.stripBandHeight,
+                    onFlightComplete: onFlightComplete
+                )
+                let layout = MorphLayout()
+                layout.mode = .strip
+                cv.setCollectionViewLayout(layout, animated: true)
+                coord.reconfigure(assetIDs)
                 coord.scrollToCurrent(cv, animated: false)
             }
         } else {
@@ -136,18 +215,11 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
                 if let c = currentID { dirty.insert(c) }
             }
             let present = Set(assetIDs)
-            reconfigure(coord, ids: dirty.filter(present.contains))
+            coord.reconfigure(dirty.filter(present.contains))
             if !isBulkMode, prevCurrent != currentID {
                 coord.scrollToCurrent(cv, animated: true)
             }
         }
-    }
-
-    private func reconfigure(_ coord: Coordinator, ids: some Collection<String>) {
-        guard !ids.isEmpty else { return }
-        var snapshot = coord.dataSource.snapshot()
-        snapshot.reconfigureItems(Array(ids))
-        coord.dataSource.apply(snapshot, animatingDifferences: false)
     }
 
     // MARK: - Coordinator
@@ -155,14 +227,33 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
     final class Coordinator: NSObject, UICollectionViewDelegate, UICollectionViewDataSourcePrefetching {
         var onTap: (String) -> Void
         var dataSource: UICollectionViewDiffableDataSource<Int, String>!
+        weak var collectionView: UICollectionView?
+        weak var container: UIView?
+        /// Top overlay the flight image is added to (above the fading hero).
+        weak var flightContainer: UIView?
         var assetIDs: [String] = []
         var selectedIDs: Set<String> = []
         var currentID: String?
         var isBulkMode = false
         var targetSize: CGSize = .zero
+        var heroImage: UIImage?
+
+        /// Asset whose cell is hidden because the hero flight is currently drawing
+        /// it as a floating image view; the cell reappears when the flight ends.
+        var flightHiddenID: String?
+        private var flightView: UIImageView?
+
+        private static let flightDuration: TimeInterval = 0.3
 
         init(onTap: @escaping (String) -> Void) {
             self.onTap = onTap
+        }
+
+        func reconfigure(_ ids: some Collection<String>) {
+            guard !ids.isEmpty else { return }
+            var snapshot = dataSource.snapshot()
+            snapshot.reconfigureItems(Array(ids))
+            dataSource.apply(snapshot, animatingDifferences: false)
         }
 
         func scrollToCurrent(_ cv: UICollectionView, animated: Bool) {
@@ -171,6 +262,129 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
             cv.scrollToItem(at: IndexPath(item: idx, section: 0),
                             at: .centeredHorizontally, animated: animated)
         }
+
+        // MARK: Hero flight
+
+        /// Animate a floating copy of the current photo between the hero frame and
+        /// its grid cell. `entering == true` shrinks hero→cell (bulk), `false`
+        /// grows cell→hero (browse). Skips cleanly when there's no current cell on
+        /// screen or no cached thumbnail to fly — calling `onExpandComplete` so an
+        /// expand never leaves the hero hidden.
+        func runHeroFlight(
+            entering: Bool,
+            currentID: String?,
+            targetSize: CGSize,
+            stripBandHeight: CGFloat,
+            onFlightComplete: @escaping (Bool) -> Void
+        ) {
+            finishFlight()
+
+            // Prefer the hero's full-aspect display image; fall back to the square
+            // thumbnail (which can only do a fill→fill zoom) if it hasn't loaded.
+            let flightImage = heroImage ?? ImageLoader.shared.cachedThumbnail(localID: currentID ?? "", targetSize: targetSize)
+
+            guard let container, let cv = collectionView,
+                  let id = currentID,
+                  let idx = assetIDs.firstIndex(of: id),
+                  let image = flightImage,
+                  let attr = cv.layoutAttributesForItem(at: IndexPath(item: idx, section: 0))
+            else {
+                onFlightComplete(entering)
+                return
+            }
+
+            // Only fly when the destination/source cell is actually on screen;
+            // otherwise the photo would zoom toward an off-screen point.
+            let visibleContent = CGRect(origin: cv.contentOffset, size: cv.bounds.size)
+            guard attr.frame.intersects(visibleContent) else {
+                onFlightComplete(entering)
+                return
+            }
+
+            let cellRect = attr.frame.offsetBy(dx: -cv.contentOffset.x, dy: -cv.contentOffset.y)
+            // Match PhotoCardView's page rect — full width inset by its horizontal
+            // margin, top region above the strip band — so the flight lands exactly
+            // where the carousel shows the photo (seamless handoff).
+            let heroMargin: CGFloat = 24
+            let heroRect = CGRect(x: heroMargin, y: 0,
+                                  width: container.bounds.width - 2 * heroMargin,
+                                  height: container.bounds.height - stripBandHeight)
+            // The hero shows the photo aspect-fit (letterboxed); the cell shows it
+            // aspect-fill (cropped square). Fly an aspectFill image view between the
+            // photo's *fitted* rect (where fill == the whole photo, no crop) and the
+            // square cell rect — as the frame squares up, the fill crops in, so the
+            // sizing morphs fit→fill. With only the cropped thumbnail we can't do
+            // that, so fall back to the full hero rect (fill→fill).
+            let heroFrame = heroImage != nil
+                ? Self.aspectFitRect(for: image.size, in: heroRect)
+                : heroRect
+
+            // Hide the real cell so it isn't drawn twice while the flight runs.
+            flightHiddenID = id
+            reconfigure([id])
+
+            let fromRect = entering ? heroFrame : cellRect
+            let toRect = entering ? cellRect : heroFrame
+            let fromRadius: CGFloat = entering ? 0 : 4
+            let toRadius: CGFloat = entering ? 4 : 0
+
+            let fv = UIImageView(image: image)
+            fv.contentMode = .scaleAspectFill
+            fv.clipsToBounds = true
+            fv.layer.cornerRadius = fromRadius
+            fv.frame = fromRect
+            // Add to the top overlay (coincident with the grid's bounds) so the
+            // flying photo is above the fading PhotoCardView; fall back to the
+            // grid container if the overlay isn't wired up.
+            (flightContainer ?? container).addSubview(fv)
+            flightView = fv
+
+            let corner = CABasicAnimation(keyPath: "cornerRadius")
+            corner.fromValue = fromRadius
+            corner.toValue = toRadius
+            corner.duration = Self.flightDuration
+            corner.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            fv.layer.add(corner, forKey: "cornerRadius")
+            fv.layer.cornerRadius = toRadius
+
+            UIView.animate(withDuration: Self.flightDuration, delay: 0, options: [.curveEaseInOut]) {
+                fv.frame = toRect
+            } completion: { [weak self] _ in
+                guard let self else { return }
+                if entering {
+                    self.finishFlight()
+                    onFlightComplete(true)
+                } else {
+                    // Hand the photo back to the carousel first (unsuppress its
+                    // foreground where the flight just landed), then drop the flight
+                    // a runloop later so there's no gap where neither is visible.
+                    onFlightComplete(false)
+                    DispatchQueue.main.async { self.finishFlight() }
+                }
+            }
+        }
+
+        private func finishFlight() {
+            flightView?.removeFromSuperview()
+            flightView = nil
+            if let id = flightHiddenID {
+                flightHiddenID = nil
+                reconfigure([id])
+            }
+        }
+
+        /// The rect an `imageSize` photo occupies when aspect-fit (letterboxed)
+        /// inside `bounds`, centered. An aspectFill image view filling this rect
+        /// shows the whole photo with no crop — matching the hero.
+        private static func aspectFitRect(for imageSize: CGSize, in bounds: CGRect) -> CGRect {
+            guard imageSize.width > 0, imageSize.height > 0 else { return bounds }
+            let scale = min(bounds.width / imageSize.width, bounds.height / imageSize.height)
+            let w = imageSize.width * scale
+            let h = imageSize.height * scale
+            return CGRect(x: bounds.midX - w / 2, y: bounds.midY - h / 2, width: w, height: h)
+        }
+
+        // MARK: Delegate
 
         func collectionView(_ cv: UICollectionView, didSelectItemAt indexPath: IndexPath) {
             cv.deselectItem(at: indexPath, animated: false)
@@ -205,9 +419,9 @@ final class MorphLayout: UICollectionViewLayout {
     private let stripCell: CGFloat = 36
     private let horizontalPadding: CGFloat = 16
     private let stripBandHeight = MorphingThumbnailGrid.stripBandHeight
-    /// Clearance at the top of the grid so the first row clears the floating
-    /// "N selected" capsule that `MediaRegionView` overlays in bulk mode.
-    private let gridTopInset: CGFloat = 38
+    /// Small breathing room above the first grid row (the selection count now
+    /// lives in the header above the region, not floating over the grid).
+    private let gridTopInset: CGFloat = 6
 
     private var attributes: [UICollectionViewLayoutAttributes] = []
     private var contentSize: CGSize = .zero
@@ -324,7 +538,7 @@ final class ThumbCell: UICollectionViewCell {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func configure(localID: String, targetSize: CGSize, isBulk: Bool, isSelected: Bool, isCurrent: Bool) {
+    func configure(localID: String, targetSize: CGSize, isBulk: Bool, isSelected: Bool, isCurrent: Bool, isHiddenForFlight: Bool) {
         if isBulk {
             checkmark.isHidden = false
             let name = isSelected ? "checkmark.circle.fill" : "circle"
@@ -340,6 +554,11 @@ final class ThumbCell: UICollectionViewCell {
             checkmark.isHidden = true
             borderView.isHidden = !isCurrent
             contentView.alpha = isCurrent ? 1 : 0.6
+        }
+
+        // Hidden while the hero flight draws this asset as a floating image view.
+        if isHiddenForFlight {
+            contentView.alpha = 0
         }
 
         // Only (re)load the image when the cell binds to a different asset — a
