@@ -15,6 +15,7 @@ struct SortSessionView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(PhotoLibrary.self) private var library
+    @Environment(\.displayScale) private var displayScale
 
     @State private var vm: SortSessionViewModel?
     @State private var showingContextEditor = false
@@ -24,6 +25,15 @@ struct SortSessionView: View {
     /// True for the duration of a bulk-mode transition: the carousel hides its own
     /// photo so the hero-zoom flight owns it, then the flight hands it back.
     @State private var heroForegroundSuppressed = false
+    /// Lets the toolbar read the bulk grid's top-visible photo when exiting, so the
+    /// carousel opens at the scroll position rather than where it was left.
+    @State private var bulkAnchor = BulkGridAnchor()
+    /// Display image pre-decoded for a scroll-anchored exit, so the hero zoom uses
+    /// the full-aspect image (fit→fill) rather than the square thumbnail. Kept
+    /// separate from `heroImage` so PhotoCardView's (asset, nil) report for the
+    /// freshly-activated anchor page can't clobber it; the flight prefers it.
+    @State private var preloadedHeroID: String?
+    @State private var preloadedHeroImage: UIImage?
 
     private var columnCountKey: String {
         "albumGridColumns_\(context.uuid.uuidString)"
@@ -56,18 +66,10 @@ struct SortSessionView: View {
                 HStack(spacing: 12) {
                     if let vm {
                         Button {
-                            // Suppress the carousel's own photo for the whole
-                            // transition so the hero-zoom flight owns it; the
-                            // flight hands it back on completion. The card's backdrop
-                            // and peeking neighbors fade via its opacity (bound to
-                            // bulk mode), concurrent with the flight.
-                            heroForegroundSuppressed = true
-                            withAnimation(.easeInOut(duration: 0.3)) {
-                                if vm.isBulkMode {
-                                    vm.exitBulkMode()
-                                } else {
-                                    vm.enterBulkMode()
-                                }
+                            if vm.isBulkMode {
+                                exitBulkMode(vm: vm)
+                            } else {
+                                enterBulkMode(vm: vm)
                             }
                         } label: {
                             Image(systemName: vm.isBulkMode
@@ -109,6 +111,65 @@ struct SortSessionView: View {
         .onDisappear { ImageLoader.shared.reset() }
         .onChange(of: columnCount) { _, newValue in
             UserDefaults.standard.set(newValue, forKey: columnCountKey)
+        }
+    }
+
+    // MARK: - Bulk mode toggle
+
+    private func enterBulkMode(vm: SortSessionViewModel) {
+        preloadedHeroID = nil
+        preloadedHeroImage = nil
+        // Suppress the carousel's own photo for the whole transition so the
+        // hero-zoom flight owns it; the flight hands it back on completion. The
+        // card's backdrop and peeking neighbors fade via its opacity (bound to bulk
+        // mode), concurrent with the flight.
+        heroForegroundSuppressed = true
+        withAnimation(.easeInOut(duration: 0.3)) { vm.enterBulkMode() }
+    }
+
+    /// Exit multi-select, opening the carousel at the grid's scroll position. Before
+    /// flipping modes, pre-decode that photo's display image so the hero zoom uses
+    /// the full-aspect image (fit→fill) instead of the square thumbnail.
+    private func exitBulkMode(vm: SortSessionViewModel) {
+        guard let id = bulkAnchor.topVisibleID() else {
+            heroForegroundSuppressed = true
+            withAnimation(.easeInOut(duration: 0.3)) { vm.exitBulkMode() }
+            return
+        }
+        // Point the carousel at the anchor up front, without animation, so it
+        // doesn't visibly whip-scroll to the new page once it reappears — it jumps
+        // there (invisibly, behind the grid) while the display image decodes.
+        var noAnimation = Transaction()
+        noAnimation.disablesAnimations = true
+        withTransaction(noAnimation) { vm.showAsset(id: id) }
+        Task {
+            if let image = await preloadDisplayImage(for: id) {
+                preloadedHeroID = id
+                preloadedHeroImage = image
+            }
+            heroForegroundSuppressed = true
+            withAnimation(.easeInOut(duration: 0.3)) { vm.exitBulkMode() }
+        }
+    }
+
+    /// Decode the asset's display image at hero size, capped so a slow (e.g. iCloud)
+    /// fetch can't stall the exit — returns nil on timeout and the flight falls back
+    /// to the cached thumbnail.
+    private func preloadDisplayImage(for id: String) async -> UIImage? {
+        let side = 600 * displayScale
+        let target = CGSize(width: side, height: side)
+        return await withTaskGroup(of: UIImage?.self) { group in
+            group.addTask {
+                guard let asset = AlbumService.asset(for: id) else { return nil }
+                return await ImageLoader.shared.loadDisplayImage(for: asset, targetSize: target)
+            }
+            group.addTask {
+                try? await Task.sleep(for: .milliseconds(250))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
         }
     }
 
@@ -176,6 +237,9 @@ struct SortSessionView: View {
             MediaRegionView(
                 vm: vm,
                 heroForegroundSuppressed: $heroForegroundSuppressed,
+                anchor: bulkAnchor,
+                preloadedHeroID: preloadedHeroID,
+                preloadedHeroImage: preloadedHeroImage,
                 photoHeightKey: photoHeightKey
             )
 
@@ -236,6 +300,12 @@ private struct MediaRegionView: View {
     /// to false for a seamless handoff. Owned by `SortSessionView` and set true in
     /// the same action that toggles bulk mode (before the body commits).
     @Binding var heroForegroundSuppressed: Bool
+    let anchor: BulkGridAnchor
+    /// Pre-decoded full-aspect image for a scroll-anchored exit, with the asset it
+    /// belongs to. Preferred by the flight over `heroImage` so the anchor photo
+    /// zooms fit→fill even before PhotoCardView has loaded it.
+    let preloadedHeroID: String?
+    let preloadedHeroImage: UIImage?
     let photoHeightKey: String
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -243,10 +313,13 @@ private struct MediaRegionView: View {
     @State private var photoHeight: CGFloat = 300
     @State private var dragStartHeight: CGFloat?
     @State private var wasInNotch = false
-    /// Latest decoded display image of the current hero photo, reported by
-    /// PhotoCardView. The hero-zoom flight uses it (full aspect) rather than the
-    /// cropped grid thumbnail, so it can morph aspect-fit → aspect-fill.
+    /// Latest decoded display image of the hero photo, reported by PhotoCardView,
+    /// and the asset it belongs to. The hero-zoom flight uses the image (full
+    /// aspect) rather than the cropped grid thumbnail — but only when `heroImageID`
+    /// still matches the current photo, so a scroll-anchored exit doesn't fly the
+    /// previous photo's image while the new one is still loading.
     @State private var heroImage: UIImage?
+    @State private var heroImageID: String?
     /// Top overlay hosting the hero-zoom flight image, so it draws above the
     /// PhotoCardView as that fades its backdrop and peeking neighbors out/in.
     @State private var flightLayer = FlightLayer()
@@ -256,6 +329,16 @@ private struct MediaRegionView: View {
     private let defaultPhotoHeight: CGFloat = 300
     private let notchRadius: CGFloat = 30
     private let notchDamping: CGFloat = 0.25
+
+    /// The full-aspect image the hero-zoom flight should use for the current photo:
+    /// the pre-decoded anchor image when present (scroll-anchored exit), otherwise
+    /// PhotoCardView's reported image when it still matches the current photo.
+    private var effectiveHeroImage: UIImage? {
+        if preloadedHeroID == vm.currentAssetID, let image = preloadedHeroImage {
+            return image
+        }
+        return heroImageID == vm.currentAssetID ? heroImage : nil
+    }
 
     var body: some View {
         VStack(spacing: 6) {
@@ -270,8 +353,9 @@ private struct MediaRegionView: View {
                     isBulkMode: vm.isBulkMode,
                     currentID: vm.currentAssetID,
                     selectedIDs: vm.bulkSelectedIDs,
-                    heroImage: heroImage,
+                    heroImage: effectiveHeroImage,
                     flightLayer: flightLayer,
+                    anchor: anchor,
                     onTap: { id in
                         if vm.isBulkMode {
                             vm.toggleBulkSelection(id)
@@ -293,7 +377,10 @@ private struct MediaRegionView: View {
                         get: { vm.currentAssetID },
                         set: { id in if let id { vm.showAsset(id: id) } }
                     ),
-                    onActiveImage: { heroImage = $0 },
+                    onActiveImage: { id, image in
+                        heroImageID = id
+                        heroImage = image
+                    },
                     suppressForeground: heroForegroundSuppressed,
                     isForeground: !vm.isBulkMode
                 )

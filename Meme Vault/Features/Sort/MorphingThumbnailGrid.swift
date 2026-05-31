@@ -51,6 +51,14 @@ struct HeroFlightOverlay: UIViewRepresentable {
     func updateUIView(_ uiView: UIView, context: Context) {}
 }
 
+/// Lets the toolbar ask the grid which photo is at the top of its current scroll
+/// position, so exiting multi-select can open the carousel there instead of at
+/// wherever it was left. The closure is installed by `MorphingThumbnailGrid`'s
+/// coordinator; it returns nil when not in the grid or nothing is visible.
+final class BulkGridAnchor {
+    var topVisibleID: () -> String? = { nil }
+}
+
 struct MorphingThumbnailGrid: UIViewRepresentable {
     let assetIDs: [String]
     let isBulkMode: Bool
@@ -62,6 +70,9 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
     let heroImage: UIImage?
     /// Top overlay that hosts the flight image so it draws above the fading hero.
     let flightLayer: FlightLayer
+    /// Reports the photo at the top of the grid's scroll position, so exiting
+    /// multi-select can open the carousel there.
+    let anchor: BulkGridAnchor
     let onTap: (String) -> Void
     /// Called when a flight finishes (the Bool is `entering` bulk), so the parent
     /// can hand the photo back to the carousel — unsuppressing its foreground for
@@ -139,6 +150,7 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
         coord.collectionView = cv
         coord.container = container
         coord.flightContainer = flightLayer.view
+        anchor.topVisibleID = { [weak coord] in coord?.topVisibleAssetID() }
 
         var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
         snapshot.appendSections([0])
@@ -184,7 +196,7 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
                 let layout = MorphLayout()
                 layout.mode = .grid
                 cv.setCollectionViewLayout(layout, animated: true)
-                cv.setContentOffset(.zero, animated: false)
+                coord.scrollGridToCurrent(cv)
                 coord.reconfigure(assetIDs)
                 coord.runHeroFlight(
                     entering: true,
@@ -270,11 +282,34 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
             dataSource.apply(snapshot, animatingDifferences: false)
         }
 
+        /// The asset at the top-left of the grid's visible area, skipping any row
+        /// clipped at the top edge so it's the first *fully* visible cell. Used when
+        /// exiting multi-select to open the carousel at the current scroll position.
+        func topVisibleAssetID() -> String? {
+            guard isBulkMode, let cv = collectionView else { return nil }
+            let top = cv.contentOffset.y
+            return cv.indexPathsForVisibleItems
+                .filter { (cv.layoutAttributesForItem(at: $0)?.frame.minY ?? -.greatestFiniteMagnitude) >= top - 1 }
+                .min()
+                .flatMap { dataSource.itemIdentifier(for: $0) }
+        }
+
         func scrollToCurrent(_ cv: UICollectionView, animated: Bool) {
             guard !isBulkMode, let id = currentID,
                   let idx = assetIDs.firstIndex(of: id) else { return }
             cv.scrollToItem(at: IndexPath(item: idx, section: 0),
                             at: .centeredHorizontally, animated: animated)
+        }
+
+        /// Scroll the grid so the current item sits at the top — the position
+        /// `topVisibleAssetID` reads on exit, so entering then exiting round-trips
+        /// to the same photo, and the hero zoom flies into a visible cell.
+        func scrollGridToCurrent(_ cv: UICollectionView) {
+            guard let id = currentID, let idx = assetIDs.firstIndex(of: id) else {
+                cv.setContentOffset(.zero, animated: false)
+                return
+            }
+            cv.scrollToItem(at: IndexPath(item: idx, section: 0), at: .top, animated: false)
         }
 
         // MARK: Hero flight

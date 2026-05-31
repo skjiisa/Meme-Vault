@@ -15,10 +15,11 @@ import AVKit
 struct PhotoCardView: View {
     let assetIDs: [String]
     @Binding var currentID: String?
-    /// Reports the decoded display image of the active page (and nil while it
-    /// loads). The sort screen reuses it for the hero-zoom flight into the grid,
-    /// which needs the full-aspect image — the square grid thumbnail is cropped.
-    var onActiveImage: ((UIImage?) -> Void)? = nil
+    /// Reports the active page's asset id and its decoded display image (nil while
+    /// loading). The sort screen reuses the image for the hero-zoom flight into the
+    /// grid (it needs the full-aspect image — the grid thumbnail is square-cropped)
+    /// and the id to know whether the image still matches the current photo.
+    var onActiveImage: ((String, UIImage?) -> Void)? = nil
     /// While true the active page hides its own photo so the hero-zoom flight can
     /// own it during the transition (the backdrop and peeking neighbors stay, so
     /// they can fade independently). Set false on the flight's completion for a
@@ -89,9 +90,9 @@ private struct PhotoPage: View {
     /// True only for the page centered in the viewport. Gates the relatively
     /// expensive video/GIF playback so adjacent (prefetched) pages stay still.
     let isActive: Bool
-    /// Reports this page's display image up to `PhotoCardView` when it is the
-    /// active page — used as the hero-zoom flight image.
-    var onActiveImage: ((UIImage?) -> Void)? = nil
+    /// Reports this page's asset id + display image up to `PhotoCardView` when it
+    /// is the active page — used as the hero-zoom flight image.
+    var onActiveImage: ((String, UIImage?) -> Void)? = nil
     /// When this is the active page, hide its photo so the flight owns it.
     var suppressForeground: Bool = false
     /// Card is on-screen; gates playback so video doesn't run behind the grid.
@@ -156,7 +157,7 @@ private struct PhotoPage: View {
         .onChange(of: isActive) { _, active in
             // Paged onto this page: hand its (already-decoded) image to the hero
             // flight. loadStill reports it instead if it's still loading.
-            if active { onActiveImage?(image) }
+            if active { onActiveImage?(assetID, image) }
         }
         .onDisappear { teardownPlayer() }
     }
@@ -236,7 +237,7 @@ private struct PhotoPage: View {
         if let loaded {
             backdrop = Self.downsampledBackdrop(from: loaded)
         }
-        if isActive { onActiveImage?(loaded) }
+        if isActive { onActiveImage?(assetID, loaded) }
     }
 
     private func managePlayback() async {
