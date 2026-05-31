@@ -175,9 +175,12 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
         if modeChanged {
             cv.showsVerticalScrollIndicator = isBulkMode
             if isBulkMode {
-                // Shrink: lay the grid out first (so the destination cell frame is
-                // known), then fly the hero down into it while the other cells
-                // morph strip→grid.
+                // Shrink: capture the current cell's strip position *before* morphing
+                // away from it, lay the grid out, then fly the hero down into it
+                // while the other cells morph strip→grid. The current item's strip
+                // thumbnail fades out in place via a static proxy at that position
+                // (the real cell stays hidden as it morphs to the grid).
+                let stripFrame = coord.currentCellOnScreenFrame(currentID: currentID)
                 let layout = MorphLayout()
                 layout.mode = .grid
                 cv.setCollectionViewLayout(layout, animated: true)
@@ -190,9 +193,12 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
                     stripBandHeight: Self.stripBandHeight,
                     onFlightComplete: onFlightComplete
                 )
+                coord.fadeStripProxy(reveal: false, id: currentID, targetSize: targetSize, frame: stripFrame)
             } else {
                 // Expand: capture the current cell's grid frame *before* morphing
-                // to the strip, fly it up to the hero, then morph the rest.
+                // to the strip, fly it up to the hero, then morph the rest. The
+                // current item's strip thumbnail fades in place via a static proxy
+                // at its (post-morph) strip position.
                 coord.runHeroFlight(
                     entering: false,
                     currentID: currentID,
@@ -205,6 +211,8 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
                 cv.setCollectionViewLayout(layout, animated: true)
                 coord.reconfigure(assetIDs)
                 coord.scrollToCurrent(cv, animated: false)
+                let stripFrame = coord.currentCellOnScreenFrame(currentID: currentID)
+                coord.fadeStripProxy(reveal: true, id: currentID, targetSize: targetSize, frame: stripFrame)
             }
         } else {
             // Same mode: repaint only the cells whose selection / current state
@@ -242,8 +250,14 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
         /// it as a floating image view; the cell reappears when the flight ends.
         var flightHiddenID: String?
         private var flightView: UIImageView?
+        /// Static copy of the current item's strip thumbnail that fades in/out in
+        /// place (so it doesn't move while the real cell morphs strip↔grid).
+        private var stripProxy: UIImageView?
 
         private static let flightDuration: TimeInterval = 0.3
+        /// Fade for the strip's current-item thumbnail proxy as the flight runs.
+        private static let revealFadeDuration: TimeInterval = 0.25
+        private static let accent = UIColor(named: "AccentColor") ?? .systemBlue
 
         init(onTap: @escaping (String) -> Void) {
             self.onTap = onTap
@@ -319,7 +333,10 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
                 ? Self.aspectFitRect(for: image.size, in: heroRect)
                 : heroRect
 
-            // Hide the real cell so it isn't drawn twice while the flight runs.
+            // Snap-hide the real cell for the whole transition — it morphs between
+            // strip and grid invisibly. The visible strip thumbnail is a static
+            // proxy (see fadeStripProxy) and the big photo is the flight; the real
+            // cell is revealed once both have settled.
             flightHiddenID = id
             reconfigure([id])
 
@@ -367,10 +384,65 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
         private func finishFlight() {
             flightView?.removeFromSuperview()
             flightView = nil
+            // Hand the strip thumbnail back from the faded-in proxy to the real
+            // cell (both static, same position) and reveal the cell wherever it
+            // settled (grid cell under the flight, or strip slot under the proxy).
+            removeStripProxy()
             if let id = flightHiddenID {
                 flightHiddenID = nil
                 reconfigure([id])
             }
+        }
+
+        // MARK: Strip thumbnail proxy
+
+        /// On-screen frame of the current item's cell in whatever layout is active.
+        /// Captured while the *strip* layout is active so the proxy can fade in/out
+        /// at the strip position without moving.
+        func currentCellOnScreenFrame(currentID: String?) -> CGRect? {
+            guard let cv = collectionView, let id = currentID,
+                  let idx = assetIDs.firstIndex(of: id),
+                  let attr = cv.layoutAttributesForItem(at: IndexPath(item: idx, section: 0))
+            else { return nil }
+            return attr.frame.offsetBy(dx: -cv.contentOffset.x, dy: -cv.contentOffset.y)
+        }
+
+        /// Fades a static copy of the current item's strip thumbnail in or out at a
+        /// fixed strip-position `frame`, so the strip representation doesn't appear
+        /// to move while the real cell morphs between strip and grid (it stays
+        /// hidden). A fade-out removes itself; a fade-in is removed by `finishFlight`
+        /// once the real cell takes over.
+        func fadeStripProxy(reveal: Bool, id: String?, targetSize: CGSize, frame: CGRect?) {
+            guard let id, let frame,
+                  let host = flightContainer ?? container,
+                  let image = ImageLoader.shared.cachedThumbnail(localID: id, targetSize: targetSize)
+            else { return }
+            let proxy = UIImageView(image: image)
+            proxy.contentMode = .scaleAspectFill
+            proxy.clipsToBounds = true
+            proxy.layer.cornerRadius = 4
+            proxy.layer.borderColor = Self.accent.cgColor   // current item: accent border
+            proxy.layer.borderWidth = 2
+            proxy.frame = frame
+            proxy.alpha = reveal ? 0 : 1
+            host.addSubview(proxy)
+            stripProxy = proxy
+            UIView.animate(withDuration: Self.revealFadeDuration) {
+                proxy.alpha = reveal ? 1 : 0
+            } completion: { [weak self] _ in
+                // Fade-out: gone, drop it. Fade-in: keep until finishFlight hands
+                // off to the real cell.
+                if !reveal { self?.removeStripProxy(proxy) }
+            }
+        }
+
+        private func removeStripProxy(_ specific: UIImageView? = nil) {
+            if let specific, specific !== stripProxy {
+                specific.removeFromSuperview()
+                return
+            }
+            stripProxy?.removeFromSuperview()
+            stripProxy = nil
         }
 
         /// The rect an `imageSize` photo occupies when aspect-fit (letterboxed)
@@ -494,6 +566,9 @@ final class ThumbCell: UICollectionViewCell {
     private let checkmark = UIImageView()
     private var boundID: String?
     private var imageTask: Task<Void, Never>?
+    /// The cell's resting opacity (1, or 0.6 for a non-current strip cell), applied
+    /// unless the cell is snap-hidden during a hero-zoom flight.
+    private var baseAlpha: CGFloat = 1
 
     private static let accent = UIColor(named: "AccentColor") ?? .systemBlue
 
@@ -549,17 +624,16 @@ final class ThumbCell: UICollectionViewCell {
                 .applying(UIImage.SymbolConfiguration(textStyle: .callout))
             checkmark.image = UIImage(systemName: name, withConfiguration: cfg)
             borderView.isHidden = !isSelected
-            contentView.alpha = 1
+            baseAlpha = 1
         } else {
             checkmark.isHidden = true
             borderView.isHidden = !isCurrent
-            contentView.alpha = isCurrent ? 1 : 0.6
+            baseAlpha = isCurrent ? 1 : 0.6
         }
 
-        // Hidden while the hero flight draws this asset as a floating image view.
-        if isHiddenForFlight {
-            contentView.alpha = 0
-        }
+        // Hidden (alpha 0) while the hero flight draws this asset as a floating
+        // image view; otherwise sit at the resting opacity.
+        contentView.alpha = isHiddenForFlight ? 0 : baseAlpha
 
         // Only (re)load the image when the cell binds to a different asset — a
         // selection/current repaint reuses the decoded image already shown.
