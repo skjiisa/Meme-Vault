@@ -67,14 +67,13 @@ struct RootView: View {
                 }
             }
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    ToolbarBadges(
-                        context: displayedContext,
-                        onShowContextList: { showingContextList = true }
-                    )
-                }
+                ToolbarBadges(
+                    context: displayedContext,
+                    onShowContextList: { showingContextList = true }
+                )
+                
                 #if DEBUG
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .topBarLeading) {
                     if isSimulator {
                         Menu {
                             Button(role: .destructive) {
@@ -182,34 +181,42 @@ struct RootView: View {
 
 // MARK: - Toolbar badges (isolated from RootView to avoid @Query churn)
 
-private struct ToolbarBadges: View {
+private struct ToolbarBadges: ToolbarContent {
     let context: OrgContext?
     let onShowContextList: () -> Void
 
     @Query private var pendingDeletes: [PendingDelete]
 
-    var body: some View {
-        HStack(spacing: 12) {
+    var body: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
             Button { onShowContextList() } label: {
                 Image(systemName: "list.bullet")
             }
-            NavigationLink {
-                PhotoCollectionView(mode: .trash)
-            } label: {
-                let count = pendingDeletes.count
-                Label("Trash\(count > 0 ? " (\(count))" : "")",
-                      systemImage: "trash")
-            }
-            .disabled(pendingDeletes.isEmpty)
-            if let ctx = context {
+        }
+        
+        ToolbarItem(placement: .topBarLeading) {
+            Menu {
                 NavigationLink {
-                    PhotoCollectionView(mode: .skipped(ctx))
+                    PhotoCollectionView(mode: .trash)
                 } label: {
-                    let count = ctx.skips.count
+                    let count = pendingDeletes.count
+                    Label("Trash\(count > 0 ? " (\(count))" : "")",
+                          systemImage: "trash")
+                }
+                .disabled(pendingDeletes.isEmpty)
+                
+                NavigationLink {
+                    if let context {
+                        PhotoCollectionView(mode: .skipped(context))
+                    }
+                } label: {
+                    let count = context?.skips.count ?? 0
                     Label("Skipped\(count > 0 ? " (\(count))" : "")",
                           systemImage: "checkmark.circle")
                 }
-                .disabled(ctx.skips.isEmpty)
+                .disabled(context?.skips.isEmpty ?? true)
+            } label: {
+                Label("More", systemImage: "ellipsis")
             }
         }
     }
