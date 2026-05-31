@@ -20,9 +20,10 @@ struct SortSessionView: View {
     @State private var showingContextEditor = false
     @State private var columnCount = 3
     @State private var hasAppeared = false
-    @State private var topSafeInset: CGFloat = 0
     @State private var bottomSafeInset: CGFloat = 0
-    @Namespace private var thumbnailNamespace
+    /// True for the duration of a bulk-mode transition: the carousel hides its own
+    /// photo so the hero-zoom flight owns it, then the flight hands it back.
+    @State private var heroForegroundSuppressed = false
 
     private var columnCountKey: String {
         "albumGridColumns_\(context.uuid.uuidString)"
@@ -42,14 +43,11 @@ struct SortSessionView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        // The content sits between the nav bar and the home indicator; the grid
-        // and album list extend under those edges and re-add these insets as
-        // content margins. The top inset is the content's global offset (the
-        // nav bar isn't surfaced as a safe-area inset on the content). The
-        // bottom inset is read from the safe area directly so it stays correct
-        // even though the album list extends under the home indicator — reading
-        // the content's own maxY would just report the extended (screen) edge.
-        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { topSafeInset = $0 }
+        // The album list extends under the home indicator and re-adds this inset
+        // as a content margin. The bottom inset is read from the safe area
+        // directly so it stays correct even though the list extends under the
+        // home indicator — reading the content's own maxY would just report the
+        // extended (screen) edge.
         .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.bottom } action: { bottomSafeInset = $0 }
         .navigationTitle(context.name.isEmpty ? "Sort" : context.name)
         .navigationBarTitleDisplayMode(.inline)
@@ -58,7 +56,13 @@ struct SortSessionView: View {
                 HStack(spacing: 12) {
                     if let vm {
                         Button {
-                            withAnimation(.easeInOut(duration: 0.25)) {
+                            // Suppress the carousel's own photo for the whole
+                            // transition so the hero-zoom flight owns it; the
+                            // flight hands it back on completion. The card's backdrop
+                            // and peeking neighbors fade via its opacity (bound to
+                            // bulk mode), concurrent with the flight.
+                            heroForegroundSuppressed = true
+                            withAnimation(.easeInOut(duration: 0.3)) {
                                 if vm.isBulkMode {
                                     vm.exitBulkMode()
                                 } else {
@@ -102,6 +106,7 @@ struct SortSessionView: View {
             }
             hasAppeared = true
         }
+        .onDisappear { ImageLoader.shared.reset() }
         .onChange(of: columnCount) { _, newValue in
             UserDefaults.standard.set(newValue, forKey: columnCountKey)
         }
@@ -138,46 +143,41 @@ struct SortSessionView: View {
     @ViewBuilder
     private func sortContent(vm: SortSessionViewModel) -> some View {
         VStack(spacing: 6) {
-            // Progress header — browse mode only. In bulk mode the selection
-            // count floats over the grid so the grid can reach the nav bar.
-            if !vm.isBulkMode {
-                HStack {
+            // Header — always present so toggling bulk mode doesn't reflow the
+            // content below it. A browse-only header would shift the media region
+            // (and the in-flight hero zoom inside it) vertically mid-transition,
+            // desyncing the UIKit flight from the SwiftUI layout. Shows progress in
+            // browse and the selection count in bulk (no floating capsule).
+            HStack {
+                if vm.isBulkMode {
+                    Text("\(vm.bulkSelectedIDs.count) selected")
+                        .font(.caption.weight(.semibold))
+                } else {
                     Text(vm.progressText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Spacer()
-                    if vm.isSatisfied {
-                        Label("Sorted", systemImage: "checkmark.circle.fill")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.green)
-                    }
                 }
-                .padding(.horizontal)
+                Spacer()
+                if !vm.isBulkMode, vm.isSatisfied {
+                    Label("Sorted", systemImage: "checkmark.circle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.green)
+                }
             }
+            .padding(.horizontal)
 
-            // Resizable media region (browse card or selection grid) plus its
-            // resize grabber, extracted into a child view that owns photoHeight.
-            // Dragging the grabber then re-evaluates only that subtree, leaving
-            // the album grid, control bar, and queue strip — siblings here —
-            // out of the per-frame invalidation scope.
+            // Resizable media region — a single morphing collection view that is
+            // the strip in browse mode and the multi-select grid in bulk mode,
+            // with the PhotoCardView overlaid in browse mode — plus its resize
+            // grabber. Extracted into a child view that owns photoHeight so
+            // dragging the grabber re-evaluates only that subtree, leaving the
+            // album grid and control bar (siblings here) out of the per-frame
+            // invalidation scope.
             MediaRegionView(
                 vm: vm,
-                namespace: thumbnailNamespace,
-                topSafeInset: topSafeInset,
+                heroForegroundSuppressed: $heroForegroundSuppressed,
                 photoHeightKey: photoHeightKey
             )
-
-            // Browse mode keeps the horizontal queue strip below the grabber.
-            if !vm.isBulkMode {
-                QueueThumbnailsView(
-                    assetIDs: vm.queue,
-                    isBulkMode: false,
-                    currentID: vm.currentAssetID,
-                    selectedIDs: vm.bulkSelectedIDs,
-                    onTap: { vm.showAsset(id: $0) },
-                    namespace: thumbnailNamespace
-                )
-            }
 
             // Control bar and album grid are extracted into their own views so
             // their observation is scoped: a favorite toggle (read only by the
@@ -195,9 +195,9 @@ struct SortSessionView: View {
             )
         }
         // No bottom padding: the album list extends to the screen edge and its
-        // content inset respects the home indicator. No top padding in bulk
-        // mode so the grid sits flush against the nav bar.
-        .padding(.top, vm.isBulkMode ? 0 : 4)
+        // content inset respects the home indicator. Constant top padding so the
+        // layout doesn't shift when toggling bulk mode.
+        .padding(.top, 4)
         .alert(
             "No Destination Album",
             isPresented: Binding(
@@ -220,17 +220,22 @@ struct SortSessionView: View {
 
 // MARK: - Media region
 
-/// The resizable media region — the browse card or the bulk-selection grid —
-/// plus the resize grabber that drives its height. `photoHeight` lives here
-/// rather than in `SortSessionView` so a resize drag re-evaluates only this
-/// subtree; the album grid, control bar, and queue strip are siblings in the
-/// parent and stay out of the per-frame invalidation scope. Identity is stable
-/// across a bulk-mode toggle (the parent always builds this view in the same
-/// slot), so the region keeps its size when switching modes.
+/// The resizable media region. It stacks the `MorphingThumbnailGrid` (which is
+/// the horizontal strip in browse mode and the multi-select grid in bulk mode)
+/// with the `PhotoCardView` overlaid in browse mode, plus the resize grabber that
+/// drives its height. `photoHeight` lives here rather than in `SortSessionView`
+/// so a resize drag re-evaluates only this subtree; the album grid and control
+/// bar are siblings in the parent and stay out of the per-frame invalidation
+/// scope. Identity is stable across a bulk-mode toggle (the parent always builds
+/// this view in the same slot), so the region keeps its size when switching
+/// modes and the collection view morphs in place rather than being rebuilt.
 private struct MediaRegionView: View {
     let vm: SortSessionViewModel
-    let namespace: Namespace.ID
-    let topSafeInset: CGFloat
+    /// True for the duration of a bulk-mode transition. The carousel hides its own
+    /// photo so the hero-zoom flight owns it; the flight's completion sets it back
+    /// to false for a seamless handoff. Owned by `SortSessionView` and set true in
+    /// the same action that toggles bulk mode (before the body commits).
+    @Binding var heroForegroundSuppressed: Bool
     let photoHeightKey: String
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -238,6 +243,13 @@ private struct MediaRegionView: View {
     @State private var photoHeight: CGFloat = 300
     @State private var dragStartHeight: CGFloat?
     @State private var wasInNotch = false
+    /// Latest decoded display image of the current hero photo, reported by
+    /// PhotoCardView. The hero-zoom flight uses it (full aspect) rather than the
+    /// cropped grid thumbnail, so it can morph aspect-fit → aspect-fill.
+    @State private var heroImage: UIImage?
+    /// Top overlay hosting the hero-zoom flight image, so it draws above the
+    /// PhotoCardView as that fades its backdrop and peeking neighbors out/in.
+    @State private var flightLayer = FlightLayer()
 
     private let minPhotoHeight: CGFloat = 120
     private let maxPhotoHeight: CGFloat = 500
@@ -247,45 +259,54 @@ private struct MediaRegionView: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            if vm.isBulkMode {
-                // The grid extends up under the translucent nav bar; its
-                // ScrollView re-adds a content inset equal to the consumed
-                // safe area, so resting content stays below the bar while
-                // scrolling reveals it underneath. The selection count is a
-                // sibling in the ZStack (not inside the safe-area-ignoring
-                // grid), so it floats just below the bar.
-                ZStack(alignment: .topLeading) {
-                    QueueThumbnailsView(
-                        assetIDs: vm.queue,
-                        isBulkMode: true,
-                        currentID: vm.currentAssetID,
-                        selectedIDs: vm.bulkSelectedIDs,
-                        onTap: { vm.toggleBulkSelection($0) },
-                        namespace: namespace
-                    )
-                    .contentMargins(.top, topSafeInset)
-                    .ignoresSafeArea(.container, edges: .top)
+            // One collection view spans the whole region and morphs its cells
+            // between the strip (browse) and grid (bulk) layouts in place. In
+            // browse mode the PhotoCardView overlays the top, leaving the strip
+            // band exposed at the bottom; in bulk mode the grid fills the region
+            // and the selection count floats at the top.
+            ZStack(alignment: .topLeading) {
+                MorphingThumbnailGrid(
+                    assetIDs: vm.queue,
+                    isBulkMode: vm.isBulkMode,
+                    currentID: vm.currentAssetID,
+                    selectedIDs: vm.bulkSelectedIDs,
+                    heroImage: heroImage,
+                    flightLayer: flightLayer,
+                    onTap: { id in
+                        if vm.isBulkMode {
+                            vm.toggleBulkSelection(id)
+                        } else {
+                            vm.showAsset(id: id)
+                        }
+                    },
+                    onFlightComplete: { _ in heroForegroundSuppressed = false }
+                )
 
-                    Text("\(vm.bulkSelectedIDs.count) selected")
-                        .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .padding(.top, 8)
-                        .padding(.leading, 8)
-                }
-                .frame(height: photoHeight)
-            } else {
+                // The carousel stays mounted across the bulk toggle (so it never
+                // reloads / flashes on return) and fades via opacity. Its own photo
+                // is suppressed during the flight, which draws the photo instead;
+                // the backdrop + peeking neighbors fade concurrently. Hit testing is
+                // off in bulk so the (invisible) card doesn't eat grid taps.
                 PhotoCardView(
                     assetIDs: vm.queue,
                     currentID: Binding(
                         get: { vm.currentAssetID },
                         set: { id in if let id { vm.showAsset(id: id) } }
-                    )
+                    ),
+                    onActiveImage: { heroImage = $0 },
+                    suppressForeground: heroForegroundSuppressed,
+                    isForeground: !vm.isBulkMode
                 )
-                .frame(height: photoHeight)
-                .transition(.blurReplace)
+                .frame(maxWidth: .infinity, alignment: .top)
+                .frame(height: photoHeight - MorphingThumbnailGrid.stripBandHeight)
+                .opacity(vm.isBulkMode ? 0 : 1)
+                .allowsHitTesting(!vm.isBulkMode)
+
+                // Topmost: the hero-zoom flight image draws here, above the fading
+                // card. Transparent and non-interactive otherwise.
+                HeroFlightOverlay(layer: flightLayer)
             }
+            .frame(height: photoHeight)
 
             // Resize grabber — drives photoHeight in both modes. The snap-to-
             // default notch only applies in browse mode; the grid has no
