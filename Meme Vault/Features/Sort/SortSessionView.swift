@@ -145,11 +145,13 @@ struct SortSessionView: View {
         withAnimation(.easeInOut(duration: 0.3)) { vm.enterBulkMode() }
     }
 
-    /// Exit multi-select, opening the carousel at the grid's scroll position. Before
+    /// Exit multi-select, opening the carousel at the first selected photo (in queue
+    /// order) — or, if nothing is selected, at the grid's scroll position. Before
     /// flipping modes, pre-decode that photo's display image so the hero zoom uses
     /// the full-aspect image (fit→fill) instead of the square thumbnail.
     private func exitBulkMode(vm: SortSessionViewModel) {
-        guard let id = bulkAnchor.topVisibleID() else {
+        let firstSelected = vm.queue.first { vm.bulkSelectedIDs.contains($0) }
+        guard let id = firstSelected ?? bulkAnchor.topVisibleID() else {
             heroForegroundSuppressed = true
             withAnimation(.easeInOut(duration: 0.3)) { vm.exitBulkMode() }
             return

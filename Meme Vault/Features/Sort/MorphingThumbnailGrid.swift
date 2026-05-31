@@ -383,7 +383,10 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
                   let image = flightImage,
                   let attr = cv.layoutAttributesForItem(at: IndexPath(item: idx, section: 0))
             else {
-                onFlightComplete(entering)
+                // Deferred: this runs inside updateUIView, and onFlightComplete
+                // mutates SwiftUI state (unsuppressing the carousel) — doing that
+                // synchronously during a view update drops it, leaving a blank hero.
+                DispatchQueue.main.async { onFlightComplete(entering) }
                 return
             }
 
@@ -391,7 +394,10 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
             // otherwise the photo would zoom toward an off-screen point.
             let visibleContent = CGRect(origin: cv.contentOffset, size: cv.bounds.size)
             guard attr.frame.intersects(visibleContent) else {
-                onFlightComplete(entering)
+                // Off-screen cell: no flight. Defer the callback (see above) so
+                // unsuppressing the carousel isn't dropped mid-update — otherwise the
+                // hero stays blank when exiting to a scrolled-away selected photo.
+                DispatchQueue.main.async { onFlightComplete(entering) }
                 return
             }
 
