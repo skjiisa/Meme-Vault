@@ -186,10 +186,6 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
         coord.selectedIDs = selectedIDs
         coord.currentID = currentID
 
-        // Extend the grid up under the nav bar (bulk) / reset (browse). Applied
-        // before the mode-change layout + flight so they compute in the new frame.
-        coord.applyBulkInsets(topSafeInset: topSafeInset, regionTopInset: regionTopInset)
-
         // Queue contents changed (sort/skip/delete): re-apply the snapshot. Animate
         // the diff only when we're not also morphing modes, so the two animations
         // don't fight.
@@ -210,6 +206,10 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
                 // thumbnail fades out in place via a static proxy at that position
                 // (the real cell stays hidden as it morphs to the grid).
                 let stripFrame = coord.currentCellOnScreenFrame(currentID: currentID)
+                // Now extend under the nav bar (strip frame was captured first, in
+                // browse geometry) so the grid layout / scroll / flight all compute
+                // in the new extended-and-inset frame.
+                coord.applyBulkInsets(topSafeInset: topSafeInset, regionTopInset: regionTopInset)
                 let layout = MorphLayout()
                 layout.mode = .grid
                 cv.setCollectionViewLayout(layout, animated: true)
@@ -235,6 +235,11 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
                     stripBandHeight: Self.stripBandHeight,
                     onFlightComplete: onFlightComplete
                 )
+                // Reset to browse geometry only *after* the flight has read the cell
+                // position — otherwise the cell positions would be recomputed against
+                // browse insets while still in the grid, and the flight would launch
+                // from the wrong spot.
+                coord.applyBulkInsets(topSafeInset: topSafeInset, regionTopInset: regionTopInset)
                 let layout = MorphLayout()
                 layout.mode = .strip
                 cv.setCollectionViewLayout(layout, animated: true)
@@ -244,8 +249,10 @@ struct MorphingThumbnailGrid: UIViewRepresentable {
                 coord.fadeStripProxy(reveal: true, id: currentID, targetSize: targetSize, frame: stripFrame)
             }
         } else {
-            // Same mode: repaint only the cells whose selection / current state
+            // Same mode: keep the under-bar insets current (geometry may have
+            // changed), then repaint only the cells whose selection / current state
             // flipped, so a single tap doesn't reconfigure the whole grid.
+            coord.applyBulkInsets(topSafeInset: topSafeInset, regionTopInset: regionTopInset)
             var dirty = prevSelected.symmetricDifference(selectedIDs)
             if prevCurrent != currentID {
                 if let p = prevCurrent { dirty.insert(p) }
