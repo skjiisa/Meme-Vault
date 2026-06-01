@@ -725,6 +725,12 @@ private struct AlbumsItems: View {
             }
             .buttonStyle(.plain)
             .contextMenu {
+                Button("Sort to Album", systemImage: "rectangle.portrait.and.arrow.forward") {
+                    Task {
+                        await onTap(info)
+                    }
+                }
+                
                 Button("View Contents", systemImage: "photo.on.rectangle") {
                     viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
                 }
