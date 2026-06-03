@@ -694,7 +694,7 @@ private struct AlbumListView: View {
         .contentMargins(.bottom, bottomSafeInset)
         .ignoresSafeArea(.container, edges: .bottom)
         .sheet(item: $viewingAlbum) { album in
-            AlbumContentsView(album: album)
+            PhotoCollectionView(mode: .album(album))
         }
     }
 }
