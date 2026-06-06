@@ -19,6 +19,7 @@ struct RootView: View {
     private var contexts: [OrgContext]
 
     @State private var showingContextList = false
+    @State private var photoMode: PhotoCollectionView.Mode?
     @State private var showingDebugConfirm = false
     @State private var debugMessage: String?
     @State private var sessionResetTick = 0
@@ -67,14 +68,14 @@ struct RootView: View {
                 }
             }
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    ToolbarBadges(
-                        context: displayedContext,
-                        onShowContextList: { showingContextList = true }
-                    )
-                }
+                ToolbarBadges(
+                    context: displayedContext,
+                    onShowContextList: { showingContextList = true },
+                    onSelectMode: { photoMode = $0 }
+                )
+                
                 #if DEBUG
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .topBarLeading) {
                     if isSimulator {
                         Menu {
                             Button(role: .destructive) {
@@ -100,6 +101,9 @@ struct RootView: View {
                     pendingContext = context
                     showingContextList = false
                 })
+            }
+            .sheet(item: $photoMode) { mode in
+                PhotoCollectionView(mode: mode)
             }
             .alert("Debug: Clear Album Membership", isPresented: $showingDebugConfirm) {
                 #if DEBUG
@@ -182,34 +186,43 @@ struct RootView: View {
 
 // MARK: - Toolbar badges (isolated from RootView to avoid @Query churn)
 
-private struct ToolbarBadges: View {
+private struct ToolbarBadges: ToolbarContent {
     let context: OrgContext?
     let onShowContextList: () -> Void
+    let onSelectMode: (PhotoCollectionView.Mode) -> Void
 
     @Query private var pendingDeletes: [PendingDelete]
 
-    var body: some View {
-        HStack(spacing: 12) {
+    var body: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
             Button { onShowContextList() } label: {
                 Image(systemName: "list.bullet")
             }
-            NavigationLink {
-                PhotoCollectionView(mode: .trash)
-            } label: {
-                let count = pendingDeletes.count
-                Label("Trash\(count > 0 ? " (\(count))" : "")",
-                      systemImage: "trash")
-            }
-            .disabled(pendingDeletes.isEmpty)
-            if let ctx = context {
-                NavigationLink {
-                    PhotoCollectionView(mode: .skipped(ctx))
+        }
+        
+        ToolbarItem(placement: .topBarLeading) {
+            Menu {
+                Button {
+                    onSelectMode(.trash)
                 } label: {
-                    let count = ctx.skips.count
+                    let count = pendingDeletes.count
+                    Label("Trash\(count > 0 ? " (\(count))" : "")",
+                          systemImage: "trash")
+                }
+                .disabled(pendingDeletes.isEmpty)
+
+                Button {
+                    if let context {
+                        onSelectMode(.skipped(context))
+                    }
+                } label: {
+                    let count = context?.skips.count ?? 0
                     Label("Skipped\(count > 0 ? " (\(count))" : "")",
                           systemImage: "checkmark.circle")
                 }
-                .disabled(ctx.skips.isEmpty)
+                .disabled(context?.skips.isEmpty ?? true)
+            } label: {
+                Label("More", systemImage: "ellipsis")
             }
         }
     }

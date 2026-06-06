@@ -638,83 +638,49 @@ private struct AlbumListView: View {
 
     var body: some View {
         let infos = vm.albumInfos
-        let extras = vm.extraAlbumInfos
         let memberIDs = Set(vm.memberships.filter(\.isMember).map(\.id))
         let bulkDirect = vm.isBulkMode && !vm.isMultiSelectActive
         ScrollView {
             LazyVGrid(columns: albumColumns, spacing: 8) {
-                ForEach(infos, id: \.id) { info in
-                    let isMember = memberIDs.contains(info.id)
-                    Button {
-                        if vm.isBulkMode {
-                            Task { await vm.bulkAlbumTap(info.id) }
-                        } else {
-                            Task { await vm.toggleAlbum(info.id) }
-                        }
-                    } label: {
-                        AlbumGridCell(
-                            albumID: info.id,
-                            title: info.title,
-                            count: info.assetCount,
-                            isMember: bulkDirect ? false : isMember
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        Button("View Contents", systemImage: "photo.on.rectangle") {
-                            viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
-                        }
+                AlbumsItems(
+                    infos: infos,
+                    bulkDirect: bulkDirect,
+                    isMember: { info in memberIDs.contains(info.id) },
+                    shouldFadeIfNotMember: false,
+                    viewingAlbum: $viewingAlbum,
+                ) { info in
+                    if vm.isBulkMode {
+                        await vm.bulkAlbumTap(info.id)
+                    } else {
+                        await vm.toggleAlbum(info.id)
                     }
                 }
-                ForEach(vm.pinnedAlbumInfos, id: \.id) { info in
-                    let isMember = vm.memberships.first { $0.id == info.id }?.isMember ?? false
-                    Button {
-                        if vm.isBulkMode {
-                            Task { await vm.bulkAlbumTap(info.id) }
-                        } else {
-                            Task {
-                                if !vm.isMultiSelectActive {
-                                    await vm.activateMultiSelect()
-                                }
-                                await vm.toggleAlbum(info.id)
-                            }
+                
+                AlbumsItems(
+                    infos: vm.pinnedAlbumInfos,
+                    bulkDirect: bulkDirect,
+                    isMember: { info in vm.memberships.first { $0.id == info.id }?.isMember ?? false },
+                    shouldFadeIfNotMember: true,
+                    viewingAlbum: $viewingAlbum,
+                ) { info in
+                    if vm.isBulkMode {
+                        await vm.bulkAlbumTap(info.id)
+                    } else {
+                        if !vm.isMultiSelectActive {
+                            await vm.activateMultiSelect()
                         }
-                    } label: {
-                        AlbumGridCell(
-                            albumID: info.id,
-                            title: info.title,
-                            count: info.assetCount,
-                            isMember: bulkDirect ? false : isMember
-                        )
-                        .opacity(isMember ? 1 : 0.6)
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        Button("View Contents", systemImage: "photo.on.rectangle") {
-                            viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
-                        }
+                        await vm.toggleAlbum(info.id)
                     }
                 }
-                ForEach(extras, id: \.id) { info in
-                    let isMember = memberIDs.contains(info.id)
-                    Button {
-                        Task { await vm.toggleAlbum(info.id) }
-                    } label: {
-                        AlbumGridCell(
-                            albumID: info.id,
-                            title: info.title,
-                            count: info.assetCount,
-                            isMember: isMember
-                        )
-                        .opacity(isMember ? 1 : 0.6)
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        Button("View Contents", systemImage: "photo.on.rectangle") {
-                            viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
-                        }
-                    }
-                    .transition(.opacity.combined(with: .offset(y: 20)))
+                
+                AlbumsItems(
+                    infos: vm.extraAlbumInfos,
+                    bulkDirect: bulkDirect,
+                    isMember: { info in memberIDs.contains(info.id) },
+                    shouldFadeIfNotMember: true,
+                    viewingAlbum: $viewingAlbum,
+                ) { info in
+                    await vm.toggleAlbum(info.id)
                 }
             }
             .padding(.horizontal)
@@ -728,8 +694,48 @@ private struct AlbumListView: View {
         .contentMargins(.bottom, bottomSafeInset)
         .ignoresSafeArea(.container, edges: .bottom)
         .sheet(item: $viewingAlbum) { album in
-            AlbumContentsView(album: album)
+            PhotoCollectionView(mode: .album(album))
         }
     }
 }
 
+private struct AlbumsItems: View {
+    let infos: [AlbumInfo]
+    let bulkDirect: Bool
+    let isMember: (AlbumInfo) -> Bool
+    let shouldFadeIfNotMember: Bool
+    @Binding var viewingAlbum: AlbumSheetItem?
+    let onTap: (AlbumInfo) async -> Void
+    
+    var body: some View {
+        ForEach(infos) { info in
+            let isMember = self.isMember(info)
+            Button {
+                Task {
+                    await onTap(info)
+                }
+            } label: {
+                AlbumGridCell(
+                    albumID: info.id,
+                    title: info.title,
+                    count: info.assetCount,
+                    isMember: bulkDirect ? false : isMember,
+                )
+                .opacity((shouldFadeIfNotMember && !isMember) ? 0.6 : 1)
+            }
+            .buttonStyle(.plain)
+            .contextMenu {
+                Button("Sort to Album", systemImage: "rectangle.portrait.and.arrow.forward") {
+                    Task {
+                        await onTap(info)
+                    }
+                }
+                
+                Button("View Contents", systemImage: "photo.on.rectangle") {
+                    viewingAlbum = AlbumSheetItem(id: info.id, title: info.title)
+                }
+            }
+            .transition(.opacity.combined(with: .offset(y: 20)))
+        }
+    }
+}
