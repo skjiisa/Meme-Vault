@@ -61,6 +61,20 @@ final class SortSessionViewModel {
     /// the sort grid with reduced opacity.
     private(set) var pinnedAlbumInfos: [AlbumInfo] = []
 
+    /// Photos added to each album during this app run, most recent first.
+    /// Album preview grids show these at the front regardless of creation
+    /// date; the next launch falls back to natural (creation-date) order.
+    private(set) var recentAddsByAlbum: [String: [String]] = [:]
+
+    /// App-lifetime backing for `recentAddsByAlbum`, shared across sort
+    /// sessions so re-entering the screen keeps the session's ordering.
+    private static var sessionRecentAdds: [String: [String]] = [:]
+
+    /// Destination-album order per context, frozen for the app run so sorting
+    /// items doesn't reshuffle the grid mid-flow. The next launch re-evaluates
+    /// counts from scratch.
+    private static var frozenAlbumOrder: [PersistentIdentifier: [String]] = [:]
+
     enum SortAction {
         case sorted(localID: String, albumID: String)
         case sortedMulti(localID: String, adds: [String], removes: [String])
@@ -93,6 +107,7 @@ final class SortSessionViewModel {
     init(context: OrgContext, modelContext: ModelContext) {
         self.context = context
         self.modelContext = modelContext
+        self.recentAddsByAlbum = Self.sessionRecentAdds
     }
 
     // MARK: - Lifecycle
@@ -186,9 +201,32 @@ final class SortSessionViewModel {
         })
         var infos = context.albumLocalIDs.compactMap { byID[$0] }
         if context.autoSortAlbumsByCount {
-            infos.sort { $0.assetCount > $1.assetCount }
+            infos = Self.frozenCountOrder(infos, contextID: context.persistentModelID)
         }
         albumInfos = infos
+    }
+
+    /// Sort by count (most to least), but freeze the result per context for
+    /// the app run: re-sorting mid-session would shuffle albums under the
+    /// user's fingers while they sort. Albums that join the context later are
+    /// slotted in by count and then frozen too.
+    private static func frozenCountOrder(_ infos: [AlbumInfo], contextID: PersistentIdentifier) -> [AlbumInfo] {
+        guard let order = frozenAlbumOrder[contextID] else {
+            let sorted = infos.sorted { $0.assetCount > $1.assetCount }
+            frozenAlbumOrder[contextID] = sorted.map(\.id)
+            return sorted
+        }
+        let rank = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($1, $0) })
+        let sorted = infos.sorted { a, b in
+            switch (rank[a.id], rank[b.id]) {
+            case let (ra?, rb?): ra < rb
+            case (.some, nil): true
+            case (nil, .some): false
+            case (nil, nil): a.assetCount > b.assetCount
+            }
+        }
+        frozenAlbumOrder[contextID] = sorted.map(\.id)
+        return sorted
     }
 
     private func refreshPinnedAlbumInfos() {
@@ -331,12 +369,14 @@ final class SortSessionViewModel {
             if isMember {
                 try await AlbumService.remove(asset, from: collection, assumeMember: true)
                 evaluator.noteRemoved(asset: asset.localIdentifier, from: albumLocalID)
+                noteSessionRemovals([asset.localIdentifier], albumID: albumLocalID)
                 applyLocalMembershipChange(albumID: albumLocalID, delta: -1)
                 recomputeMemberships()
                 Haptics.tap()
             } else {
                 try await AlbumService.add(asset, to: collection, assumeNotMember: true)
                 evaluator.noteAdded(asset: asset.localIdentifier, to: albumLocalID)
+                noteSessionAdds([asset.localIdentifier], albumID: albumLocalID)
                 applyLocalMembershipChange(albumID: albumLocalID, delta: +1)
                 if !wasSatisfied {
                     let newMemberships = evaluator.albumMemberships(for: asset, in: context)
@@ -379,9 +419,6 @@ final class SortSessionViewModel {
     private func applyLocalMembershipChange(albumID: String, delta: Int) {
         if let i = albumInfos.firstIndex(where: { $0.id == albumID }) {
             albumInfos[i] = albumInfos[i].adjustingCount(by: delta)
-            if context.autoSortAlbumsByCount {
-                albumInfos.sort { $0.assetCount > $1.assetCount }
-            }
         }
         if let i = pinnedAlbumInfos.firstIndex(where: { $0.id == albumID }) {
             pinnedAlbumInfos[i] = pinnedAlbumInfos[i].adjustingCount(by: delta)
@@ -389,6 +426,24 @@ final class SortSessionViewModel {
         if let i = extraAlbumInfos.firstIndex(where: { $0.id == albumID }) {
             extraAlbumInfos[i] = extraAlbumInfos[i].adjustingCount(by: delta)
         }
+    }
+
+    /// Record photos added to an album this session so its preview grid can
+    /// surface them first, ahead of the natural creation-date order.
+    private func noteSessionAdds(_ ids: [String], albumID: String) {
+        guard !ids.isEmpty else { return }
+        var list = Self.sessionRecentAdds[albumID] ?? []
+        list.removeAll { ids.contains($0) }
+        list.insert(contentsOf: ids, at: 0)
+        Self.sessionRecentAdds[albumID] = list
+        recentAddsByAlbum = Self.sessionRecentAdds
+    }
+
+    private func noteSessionRemovals(_ ids: [String], albumID: String) {
+        guard !ids.isEmpty, var list = Self.sessionRecentAdds[albumID] else { return }
+        list.removeAll { ids.contains($0) }
+        Self.sessionRecentAdds[albumID] = list
+        recentAddsByAlbum = Self.sessionRecentAdds
     }
 
     func activateMultiSelect() async {
@@ -442,6 +497,7 @@ final class SortSessionViewModel {
             do {
                 try await AlbumService.add(asset, to: collection, assumeNotMember: true)
                 evaluator.noteAdded(asset: asset.localIdentifier, to: albumID)
+                noteSessionAdds([asset.localIdentifier], albumID: albumID)
                 applyLocalMembershipChange(albumID: albumID, delta: +1)
             } catch {}
         }
@@ -450,6 +506,7 @@ final class SortSessionViewModel {
             do {
                 try await AlbumService.remove(asset, from: collection, assumeMember: true)
                 evaluator.noteRemoved(asset: asset.localIdentifier, from: albumID)
+                noteSessionRemovals([asset.localIdentifier], albumID: albumID)
                 applyLocalMembershipChange(albumID: albumID, delta: -1)
             } catch {}
         }
@@ -513,6 +570,7 @@ final class SortSessionViewModel {
             }
             if !added.isEmpty {
                 addedByAlbum[albumID] = added
+                noteSessionAdds(added, albumID: albumID)
                 applyLocalMembershipChange(albumID: albumID, delta: added.count)
             }
         }
@@ -532,6 +590,7 @@ final class SortSessionViewModel {
             }
             if !removed.isEmpty {
                 removedByAlbum[albumID] = removed
+                noteSessionRemovals(removed, albumID: albumID)
                 applyLocalMembershipChange(albumID: albumID, delta: -removed.count)
             }
         }
@@ -645,6 +704,7 @@ final class SortSessionViewModel {
         }
 
         if !addedIDs.isEmpty {
+            noteSessionAdds(addedIDs, albumID: albumID)
             applyLocalMembershipChange(albumID: albumID, delta: addedIDs.count)
         }
 
@@ -748,6 +808,7 @@ final class SortSessionViewModel {
                     evaluator.noteRemoved(asset: id, from: albumID)
                 } catch {}
             }
+            noteSessionRemovals(photoIDs, albumID: albumID)
             applyLocalMembershipChange(albumID: albumID, delta: -photoIDs.count)
         }
 
@@ -760,6 +821,7 @@ final class SortSessionViewModel {
                     evaluator.noteAdded(asset: id, to: albumID)
                 } catch {}
             }
+            noteSessionAdds(photoIDs, albumID: albumID)
             applyLocalMembershipChange(albumID: albumID, delta: photoIDs.count)
         }
 
@@ -873,6 +935,7 @@ final class SortSessionViewModel {
         do {
             try await AlbumService.remove(asset, from: collection, assumeMember: true)
             evaluator.noteRemoved(asset: id, from: albumID)
+            noteSessionRemovals([id], albumID: albumID)
             applyLocalMembershipChange(albumID: albumID, delta: -1)
         } catch {}
         queue.insert(id, at: index)
@@ -886,6 +949,7 @@ final class SortSessionViewModel {
             do {
                 try await AlbumService.remove(asset, from: collection, assumeMember: true)
                 evaluator.noteRemoved(asset: id, from: albumID)
+                noteSessionRemovals([id], albumID: albumID)
                 applyLocalMembershipChange(albumID: albumID, delta: -1)
             } catch {}
         }
@@ -894,6 +958,7 @@ final class SortSessionViewModel {
             do {
                 try await AlbumService.add(asset, to: collection, assumeNotMember: true)
                 evaluator.noteAdded(asset: id, to: albumID)
+                noteSessionAdds([id], albumID: albumID)
                 applyLocalMembershipChange(albumID: albumID, delta: +1)
             } catch {}
         }
