@@ -25,6 +25,10 @@ struct PhotoCardView: View {
     /// they can fade independently). Set false on the flight's completion for a
     /// seamless handoff back to the carousel.
     var suppressForeground: Bool = false
+    /// Page whose photo has departed on a hero → album flight: that page hides
+    /// its photo immediately (the flight draws it) and fades its backdrop out,
+    /// so the photo never shows twice while it animates to the album cell.
+    var departedID: String? = nil
     /// False while the card is hidden behind the bulk grid — tears down video so
     /// it doesn't keep playing audio off-screen.
     var isForeground: Bool = true
@@ -52,6 +56,7 @@ struct PhotoCardView: View {
                             isActive: id == currentID,
                             onActiveImage: onActiveImage,
                             suppressForeground: suppressForeground,
+                            isDeparted: id == departedID,
                             isForeground: isForeground
                         )
                         .frame(width: pageWidth, height: pageHeight)
@@ -95,6 +100,9 @@ private struct PhotoPage: View {
     var onActiveImage: ((String, UIImage?) -> Void)? = nil
     /// When this is the active page, hide its photo so the flight owns it.
     var suppressForeground: Bool = false
+    /// This page's photo is mid-flight to an album cell: hide it immediately
+    /// and fade the blurred backdrop out.
+    var isDeparted: Bool = false
     /// Card is on-screen; gates playback so video doesn't run behind the grid.
     var isForeground: Bool = true
 
@@ -133,13 +141,15 @@ private struct PhotoPage: View {
                             }
                             .clipped()
                             .blur(radius: 20)
-                            .opacity(0.8)
+                            .opacity(isDeparted ? 0 : 0.8)
+                            .animation(.easeOut(duration: 0.25), value: isDeparted)
                     }
 
                     // Suppressed on the active page during a hero-zoom flight: the
                     // flight draws the photo, while the backdrop above stays so it
-                    // can fade independently.
-                    if !(suppressForeground && isActive) {
+                    // can fade independently. Hidden outright (no fade — the album
+                    // flight draws it from the same spot) when departed.
+                    if !(suppressForeground && isActive), !isDeparted {
                         foreground(stillImage: image)
                     }
                 }

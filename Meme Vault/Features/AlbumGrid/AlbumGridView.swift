@@ -22,6 +22,10 @@ struct AlbumGridCell: View {
     /// Shown at the front of the preview regardless of creation-date order;
     /// the next launch reverts to the natural order.
     var recentIDs: [String] = []
+    /// Thumbnail to render invisible (layout preserved) while the hero-flight
+    /// image is still travelling toward this cell — its slot stays blank until
+    /// the flight lands, instead of showing a duplicate under the flight.
+    var hiddenThumbID: String? = nil
     /// Reports the global frame of the preview's first (top-left) slot, so
     /// the sort screen can fly the hero image into it.
     var onFirstSlotFrame: ((CGRect) -> Void)? = nil
@@ -51,6 +55,7 @@ struct AlbumGridCell: View {
                                     .scaledToFill()
                                     .frame(width: cellSize, height: cellSize)
                                     .clipped()
+                                    .opacity(thumb.id == hiddenThumbID ? 0 : 1)
                                     .transition(.scale(scale: 0.8).combined(with: .opacity))
                             }
                             ForEach(min(thumbnails.count, 4)..<4, id: \.self) { _ in
@@ -129,7 +134,21 @@ struct AlbumGridCell: View {
                 let fetched = PHAsset.fetchAssets(withLocalIdentifiers: recentIDs, options: nil)
                 var byID: [String: PHAsset] = [:]
                 fetched.enumerateObjects { asset, _, _ in byID[asset.localIdentifier] = asset }
-                out = recentIDs.compactMap { byID[$0] }
+                // A session add can be removed again (album-contents sheet,
+                // Photos app) — keep only photos still in the album.
+                out = recentIDs.compactMap { byID[$0] }.filter { asset in
+                    var inAlbum = false
+                    let containing = PHAssetCollection.fetchAssetCollectionsContaining(
+                        asset, with: .album, options: nil
+                    )
+                    containing.enumerateObjects { collection, _, stop in
+                        if collection.localIdentifier == albumID {
+                            inAlbum = true
+                            stop.pointee = true
+                        }
+                    }
+                    return inAlbum
+                }
             }
             if out.count < 4 {
                 guard let collection = AlbumService.collection(for: albumID) else { return out }

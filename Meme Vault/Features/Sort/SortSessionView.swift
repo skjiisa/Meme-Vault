@@ -423,6 +423,7 @@ private struct MediaRegionView: View {
                         albumFlight.heroImage = image
                     },
                     suppressForeground: heroForegroundSuppressed,
+                    departedID: albumFlight.flyingPhotoID ?? vm.heroDepartedID,
                     isForeground: !vm.isBulkMode
                 )
                 .frame(maxWidth: .infinity, alignment: .top)
@@ -678,8 +679,11 @@ private struct AlbumListView: View {
                     } else {
                         // Sorting (not removing) the photo: fly the hero image
                         // into the album preview's first slot as it's added.
-                        if !vm.isMultiSelectActive, !memberIDs.contains(info.id) {
-                            albumFlight.fly(toAlbum: info.id, heroID: vm.currentAssetID)
+                        // When the flight launches, the carousel page hands its
+                        // photo over to it (goes blank, backdrop fades).
+                        if !vm.isMultiSelectActive, !memberIDs.contains(info.id),
+                           albumFlight.fly(toAlbum: info.id, heroID: vm.currentAssetID) {
+                            vm.noteHeroFlightDeparture(vm.currentAssetID)
                         }
                         await vm.toggleAlbum(info.id)
                     }
@@ -726,7 +730,9 @@ private struct AlbumListView: View {
         // so the resting content and scroll indicator stay within the safe area.
         .contentMargins(.bottom, bottomSafeInset)
         .ignoresSafeArea(.container, edges: .bottom)
-        .sheet(item: $viewingAlbum) { album in
+        // Removals made in the contents sheet are self-writes that don't bump
+        // `changeTick`, so refresh the counts (and thus the previews) here.
+        .sheet(item: $viewingAlbum, onDismiss: { vm.refreshAlbumCounts() }) { album in
             PhotoCollectionView(mode: .album(album))
         }
     }
@@ -758,6 +764,9 @@ private struct AlbumsItems: View {
                     count: info.assetCount,
                     isMember: bulkDirect ? false : isMember,
                     recentIDs: recentAdds[info.id] ?? [],
+                    hiddenThumbID: albumFlight?.flyingToAlbumID == info.id
+                        ? albumFlight?.flyingPhotoID
+                        : nil,
                     onFirstSlotFrame: albumFlight.map { flight in
                         { flight.slotFrames[info.id] = $0 }
                     }
@@ -791,26 +800,39 @@ private struct AlbumsItems: View {
 /// The media region reports the hero image/frame, the album grid cells report
 /// their first-slot frames, and `fly` animates between them in the overlay.
 @MainActor
+@Observable
 final class AlbumFlightCoordinator {
     /// Overlay spanning the sort screen that hosts the flight image view.
     let layer = FlightLayer()
     /// Latest full-aspect hero image and the asset it belongs to.
-    var heroImage: UIImage?
-    var heroImageID: String?
+    @ObservationIgnored var heroImage: UIImage?
+    @ObservationIgnored var heroImageID: String?
     /// Global frame of the carousel's photo page rect (inset by its margin).
-    var heroFrame: CGRect = .zero
+    @ObservationIgnored var heroFrame: CGRect = .zero
     /// Global frame of each album preview's first slot, keyed by album ID.
-    var slotFrames: [String: CGRect] = [:]
+    @ObservationIgnored var slotFrames: [String: CGRect] = [:]
+
+    /// Set while a flight is airborne: the destination album and the photo in
+    /// transit. The album cell keeps that thumbnail's slot blank until the
+    /// flight lands, so the photo never shows twice at once.
+    private(set) var flyingToAlbumID: String?
+    private(set) var flyingPhotoID: String?
+    /// Distinguishes overlapping flights so a stale completion doesn't clear
+    /// a newer flight's in-transit state.
+    @ObservationIgnored private var flightGeneration = 0
 
     private static let flightDuration: TimeInterval = 0.35
     private static let landingFadeDuration: TimeInterval = 0.18
 
-    func fly(toAlbum albumID: String, heroID: String?) {
+    /// Returns true when the flight actually launched (album cell on screen,
+    /// image available) — the caller hides the carousel photo only then.
+    @discardableResult
+    func fly(toAlbum albumID: String, heroID: String?) -> Bool {
         let host = layer.view
         guard let heroID, host.window != nil,
               let slotGlobal = slotFrames[albumID],
               heroFrame.width > 0
-        else { return }
+        else { return false }
 
         // Prefer the full-aspect hero image (fit→fill morph, like the bulk
         // hero zoom); fall back to the square strip thumbnail (fill→fill)
@@ -821,7 +843,7 @@ final class AlbumFlightCoordinator {
             localID: heroID,
             targetSize: CGSize(width: thumbSide, height: thumbSide)
         )
-        guard let image else { return }
+        guard let image else { return false }
 
         // SwiftUI's global space is the window's coordinate space; convert
         // both endpoints into the overlay and skip if the slot scrolled away.
@@ -830,7 +852,14 @@ final class AlbumFlightCoordinator {
             : heroFrame
         let from = host.convert(fromGlobal, from: nil)
         let to = host.convert(slotGlobal, from: nil)
-        guard host.bounds.intersects(to) else { return }
+        guard host.bounds.intersects(to) else { return false }
+
+        // Mark the photo as in transit so the album cell leaves its slot
+        // blank until the flight lands (all guards passed — the flight is on).
+        flightGeneration += 1
+        let generation = flightGeneration
+        flyingToAlbumID = albumID
+        flyingPhotoID = heroID
 
         let fv = UIImageView(image: image)
         fv.contentMode = .scaleAspectFill
@@ -849,13 +878,19 @@ final class AlbumFlightCoordinator {
         UIView.animate(withDuration: Self.flightDuration, delay: 0, options: [.curveEaseInOut]) {
             fv.frame = to
         } completion: { _ in
-            // Land, then fade to reveal the real thumbnail settling underneath.
+            // Landed: reveal the real thumbnail beneath, then fade the flight
+            // image out over it for a seamless handoff.
+            if self.flightGeneration == generation {
+                self.flyingToAlbumID = nil
+                self.flyingPhotoID = nil
+            }
             UIView.animate(withDuration: Self.landingFadeDuration, delay: 0, options: [.curveEaseOut]) {
                 fv.alpha = 0
             } completion: { _ in
                 fv.removeFromSuperview()
             }
         }
+        return true
     }
 
     /// The rect an `imageSize` photo occupies when aspect-fit (letterboxed)

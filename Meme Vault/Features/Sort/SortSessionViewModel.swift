@@ -387,10 +387,14 @@ final class SortSessionViewModel {
                         return
                     }
                 }
+                // Not advancing — the photo stays current, so its hero image
+                // must come back once the in-progress flight lands.
+                if heroDepartedID == asset.localIdentifier { heroDepartedID = nil }
                 recomputeMemberships()
                 Haptics.tap()
             }
         } catch {
+            if heroDepartedID == asset.localIdentifier { heroDepartedID = nil }
             Haptics.warning()
             print("toggleAlbum failed: \(error)")
         }
@@ -868,17 +872,67 @@ final class SortSessionViewModel {
 
     // MARK: - Advance / back
 
-    /// Advance to the next asset. Removes the current asset from the queue if
-    /// `removeCurrent` is true (used after satisfy / skip / delete).
-    /// Synchronous so callers' post-await state changes batch into one SwiftUI
-    /// update instead of splitting across a suspension point.
+    /// Assets advanced past (sort / skip / delete) whose queue removal is
+    /// deferred so the carousel can slide to the next photo first. An undo
+    /// inside the window cancels the pending removal.
+    private var pendingAdvanceRemovals: Set<String> = []
+
+    /// Photo whose hero image departed on a flight to an album cell. Its
+    /// carousel page hides the photo (the flight draws it) and fades its
+    /// backdrop, staying blank until the page leaves the queue — so the photo
+    /// never shows twice. Cleared wherever the photo stays current instead
+    /// (no advance, failed write, undo).
+    private(set) var heroDepartedID: String?
+
+    /// Called when an album flight launches with the current photo, just
+    /// before the album toggle that will advance past it.
+    func noteHeroFlightDeparture(_ id: String?) {
+        heroDepartedID = id
+    }
+
+    /// How long the deferred removal waits — long enough for the carousel's
+    /// page slide to settle so dropping the old page never disturbs it.
+    private static let advanceRemovalDelay: Duration = .milliseconds(500)
+
+    /// Advance to the next asset. When `removeCurrent` is true (used after
+    /// satisfy / skip / delete) the carousel first slides to the next photo —
+    /// the handled item stays in the queue for a beat and is dropped once the
+    /// slide has settled; removing it in the same update would swap pages
+    /// with no transition. Synchronous so callers' post-await state changes
+    /// batch into one SwiftUI update instead of splitting across a
+    /// suspension point.
     func advance(removingCurrent removeCurrent: Bool) {
-        if removeCurrent && index < queue.count {
-            queue.remove(at: index)
-        } else {
+        guard removeCurrent, index < queue.count else {
             index += 1
+            refreshCurrent()
+            return
         }
-        refreshCurrent()
+        let removedID = queue[index]
+        guard index + 1 < queue.count else {
+            // No next photo to slide to — drop immediately (shows the done view).
+            queue.remove(at: index)
+            refreshCurrent()
+            return
+        }
+        // Animated transaction so the carousel's scrollPosition slides to the
+        // next page (programmatic position changes don't animate on their own).
+        withAnimation(.easeInOut(duration: 0.35)) {
+            index += 1
+            refreshCurrent()
+        }
+        pendingAdvanceRemovals.insert(removedID)
+        Task { [weak self] in
+            try? await Task.sleep(for: Self.advanceRemovalDelay)
+            guard let self else { return }
+            // The page is about to go (or the photo is staying after all) —
+            // either way its hero image is no longer mid-departure.
+            if self.heroDepartedID == removedID { self.heroDepartedID = nil }
+            guard self.pendingAdvanceRemovals.remove(removedID) != nil else { return }
+            // Skip if the user paged back onto it; the next rebuild filters it.
+            guard let i = self.queue.firstIndex(of: removedID), i != self.index else { return }
+            self.queue.remove(at: i)
+            if i < self.index { self.index -= 1 }
+        }
     }
 
     // MARK: - Skip
@@ -900,7 +954,19 @@ final class SortSessionViewModel {
             modelContext.delete(row)
             try? modelContext.save()
         }
-        queue.insert(id, at: index)
+        restoreToQueue(id)
+    }
+
+    /// Bring an undone asset back as the current photo. If its deferred
+    /// advance-removal hasn't fired yet it's still in the queue — cancel the
+    /// removal and point back at it instead of inserting a duplicate.
+    private func restoreToQueue(_ id: String) {
+        pendingAdvanceRemovals.remove(id)
+        if heroDepartedID == id { heroDepartedID = nil }
+        if !queue.contains(id) {
+            queue.insert(id, at: min(index, queue.count))
+        }
+        if let i = queue.firstIndex(of: id) { index = i }
         refreshCurrent()
     }
 
@@ -923,8 +989,7 @@ final class SortSessionViewModel {
             modelContext.delete(row)
             try? modelContext.save()
         }
-        queue.insert(id, at: index)
-        refreshCurrent()
+        restoreToQueue(id)
     }
 
     // MARK: - Undo (sort)
@@ -938,8 +1003,7 @@ final class SortSessionViewModel {
             noteSessionRemovals([id], albumID: albumID)
             applyLocalMembershipChange(albumID: albumID, delta: -1)
         } catch {}
-        queue.insert(id, at: index)
-        refreshCurrent()
+        restoreToQueue(id)
     }
 
     private func undoSortMulti(id: String, adds: [String], removes: [String]) async {
@@ -962,8 +1026,7 @@ final class SortSessionViewModel {
                 applyLocalMembershipChange(albumID: albumID, delta: +1)
             } catch {}
         }
-        queue.insert(id, at: index)
-        refreshCurrent()
+        restoreToQueue(id)
     }
 
     func undo() async {
@@ -992,12 +1055,31 @@ final class SortSessionViewModel {
     /// an active sort session the vast majority of these are self-write leaks
     /// (the `pendingSelfWrites` counter can't reliably suppress every PhotoKit
     /// callback). A full queue rebuild here would cost hundreds of milliseconds
-    /// and stutter the UI, so we only refresh the current asset's metadata.
-    /// Actual queue rebuilds are deferred to explicit user actions: first load
-    /// (`start`), view reappear (`refreshAfterReappear`), and context edit
-    /// dismiss (`rebuildQueue`).
+    /// and stutter the UI, so we only refresh the current asset's metadata and
+    /// the (cheap, estimated) album counts. Actual queue rebuilds are deferred
+    /// to explicit user actions: first load (`start`), view reappear
+    /// (`refreshAfterReappear`), and context edit dismiss (`rebuildQueue`).
     func handleLibraryChange() {
         refreshCurrent()
+        refreshAlbumCounts()
+    }
+
+    /// Re-reads counts for the cached album snapshots in place — order is
+    /// preserved, so the frozen sort order is untouched. Cheap: one collection
+    /// fetch using estimated counts, no per-album asset enumeration. Covers
+    /// changes that bypass the local count patching: external library edits
+    /// and removals made in the album-contents sheet (whose self-writes don't
+    /// bump `changeTick`, so the sheet's dismiss calls this directly).
+    func refreshAlbumCounts() {
+        let ids = (albumInfos + pinnedAlbumInfos + extraAlbumInfos).map(\.id)
+        guard !ids.isEmpty else { return }
+        let collections = AlbumService.collections(for: ids)
+        let byID = Dictionary(uniqueKeysWithValues: collections.map {
+            ($0.localIdentifier, AlbumInfo(collection: $0))
+        })
+        albumInfos = albumInfos.map { byID[$0.id] ?? $0 }
+        pinnedAlbumInfos = pinnedAlbumInfos.map { byID[$0.id] ?? $0 }
+        extraAlbumInfos = extraAlbumInfos.map { byID[$0.id] ?? $0 }
     }
 
     /// Updates the default context's album IDs without counting assets per
