@@ -1056,27 +1056,49 @@ final class SortSessionViewModel {
     /// (the `pendingSelfWrites` counter can't reliably suppress every PhotoKit
     /// callback). A full queue rebuild here would cost hundreds of milliseconds
     /// and stutter the UI, so we only refresh the current asset's metadata and
-    /// the (cheap, estimated) album counts. Actual queue rebuilds are deferred
-    /// to explicit user actions: first load (`start`), view reappear
+    /// schedule a coalesced album-count refresh. Actual queue rebuilds are
+    /// deferred to explicit user actions: first load (`start`), view reappear
     /// (`refreshAfterReappear`), and context edit dismiss (`rebuildQueue`).
     func handleLibraryChange() {
         refreshCurrent()
-        refreshAlbumCounts()
+        scheduleAlbumCountRefresh()
+    }
+
+    private var albumCountRefreshPending = false
+
+    /// Coalesces bursts of change notifications — on large libraries (iCloud
+    /// sync, launch indexing) PhotoKit can fire many per second, and doing a
+    /// fetch per tick would hammer it. At most one refresh per window, with
+    /// the PhotoKit work off the main actor.
+    private func scheduleAlbumCountRefresh() {
+        guard !albumCountRefreshPending else { return }
+        albumCountRefreshPending = true
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard let self else { return }
+            self.albumCountRefreshPending = false
+            await self.refreshAlbumCountsNow()
+        }
     }
 
     /// Re-reads counts for the cached album snapshots in place — order is
     /// preserved, so the frozen sort order is untouched. Cheap: one collection
-    /// fetch using estimated counts, no per-album asset enumeration. Covers
-    /// changes that bypass the local count patching: external library edits
-    /// and removals made in the album-contents sheet (whose self-writes don't
-    /// bump `changeTick`, so the sheet's dismiss calls this directly).
+    /// fetch (off-main) using estimated counts, no per-album asset
+    /// enumeration. Covers changes that bypass the local count patching:
+    /// external library edits and removals made in the album-contents sheet
+    /// (whose self-writes don't bump `changeTick`, so the sheet's dismiss
+    /// calls `refreshAlbumCounts()` directly).
     func refreshAlbumCounts() {
+        Task { await refreshAlbumCountsNow() }
+    }
+
+    private func refreshAlbumCountsNow() async {
         let ids = (albumInfos + pinnedAlbumInfos + extraAlbumInfos).map(\.id)
         guard !ids.isEmpty else { return }
-        let collections = AlbumService.collections(for: ids)
-        let byID = Dictionary(uniqueKeysWithValues: collections.map {
-            ($0.localIdentifier, AlbumInfo(collection: $0))
-        })
+        let infos: [AlbumInfo] = await Task.detached(priority: .utility) {
+            AlbumService.collections(for: ids).map { AlbumInfo(collection: $0) }
+        }.value
+        let byID = Dictionary(infos.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         albumInfos = albumInfos.map { byID[$0.id] ?? $0 }
         pinnedAlbumInfos = pinnedAlbumInfos.map { byID[$0.id] ?? $0 }
         extraAlbumInfos = extraAlbumInfos.map { byID[$0.id] ?? $0 }
