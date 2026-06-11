@@ -142,7 +142,7 @@ private struct PhotoPage: View {
                             .clipped()
                             .blur(radius: 20)
                             .opacity(isDeparted ? 0 : 0.8)
-                            .animation(.easeOut(duration: 0.25), value: isDeparted)
+                            .animation(.easeOut(duration: 0.15), value: isDeparted)
                     }
 
                     // Suppressed on the active page during a hero-zoom flight: the

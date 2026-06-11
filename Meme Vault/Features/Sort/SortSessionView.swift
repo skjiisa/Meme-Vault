@@ -821,8 +821,8 @@ final class AlbumFlightCoordinator {
     /// a newer flight's in-transit state.
     @ObservationIgnored private var flightGeneration = 0
 
-    private static let flightDuration: TimeInterval = 0.35
-    private static let landingFadeDuration: TimeInterval = 0.18
+    private static let flightDuration: TimeInterval = 0.25
+    private static let landingFadeDuration: TimeInterval = 0.12
 
     /// Returns true when the flight actually launched (album cell on screen,
     /// image available) — the caller hides the carousel photo only then.
