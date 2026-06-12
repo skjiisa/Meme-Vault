@@ -665,6 +665,7 @@ private struct AlbumListView: View {
         let bulkDirect = vm.isBulkMode && !vm.isMultiSelectActive
         ScrollView {
             LazyVGrid(columns: albumColumns, spacing: 8) {
+
                 AlbumsItems(
                     infos: infos,
                     bulkDirect: bulkDirect,
@@ -721,6 +722,7 @@ private struct AlbumListView: View {
                 }
             }
             .padding(.horizontal)
+            .animation(.easeInOut(duration: 0.2), value: columnCount)
             .animation(.easeInOut(duration: 0.25), value: Set(infos.map(\.id)))
             .animation(.easeInOut(duration: 0.25), value: Set(vm.pinnedAlbumInfos.map(\.id)))
             .animation(.easeInOut(duration: 0.25), value: vm.extraAlbumIDs)

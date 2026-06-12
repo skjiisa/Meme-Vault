@@ -898,7 +898,7 @@ final class SortSessionViewModel {
             return
         }
         let removedID = queue[index]
-        withAnimation(.easeInOut(duration: 0.35)) {
+        withAnimation(.interactiveSpring(duration: 0.25)) {
             queue.remove(at: index)
             refreshCurrent()
         }
