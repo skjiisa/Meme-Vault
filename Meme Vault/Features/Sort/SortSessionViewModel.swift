@@ -872,16 +872,11 @@ final class SortSessionViewModel {
 
     // MARK: - Advance / back
 
-    /// Assets advanced past (sort / skip / delete) whose queue removal is
-    /// deferred so the carousel can slide to the next photo first. An undo
-    /// inside the window cancels the pending removal.
-    private var pendingAdvanceRemovals: Set<String> = []
-
     /// Photo whose hero image departed on a flight to an album cell. Its
-    /// carousel page hides the photo (the flight draws it) and fades its
-    /// backdrop, staying blank until the page leaves the queue — so the photo
-    /// never shows twice. Cleared wherever the photo stays current instead
-    /// (no advance, failed write, undo).
+    /// carousel page hides the photo (the flight draws it) and fades the rest
+    /// of the card, staying blank through its removal transition — so the
+    /// photo never shows twice. Cleared wherever the photo stays current
+    /// instead (no advance, failed write, undo).
     private(set) var heroDepartedID: String?
 
     /// Called when an album flight launches with the current photo, just
@@ -890,17 +885,12 @@ final class SortSessionViewModel {
         heroDepartedID = id
     }
 
-    /// How long the deferred removal waits — long enough for the carousel's
-    /// page slide to settle so dropping the old page never disturbs it.
-    private static let advanceRemovalDelay: Duration = .milliseconds(500)
-
-    /// Advance to the next asset. When `removeCurrent` is true (used after
-    /// satisfy / skip / delete) the carousel first slides to the next photo —
-    /// the handled item stays in the queue for a beat and is dropped once the
-    /// slide has settled; removing it in the same update would swap pages
-    /// with no transition. Synchronous so callers' post-await state changes
-    /// batch into one SwiftUI update instead of splitting across a
-    /// suspension point.
+    /// Advance past the current asset. When `removeCurrent` is true (used
+    /// after satisfy / skip / delete) the item is removed in an animated
+    /// transaction: its carousel page fades out in place while the next photo
+    /// slides over to take its spot, and the thumbnail strip diffs the same
+    /// way. Synchronous so callers' post-await state changes batch into one
+    /// SwiftUI update instead of splitting across a suspension point.
     func advance(removingCurrent removeCurrent: Bool) {
         guard removeCurrent, index < queue.count else {
             index += 1
@@ -908,30 +898,17 @@ final class SortSessionViewModel {
             return
         }
         let removedID = queue[index]
-        guard index + 1 < queue.count else {
-            // No next photo to slide to — drop immediately (shows the done view).
+        withAnimation(.easeInOut(duration: 0.35)) {
             queue.remove(at: index)
             refreshCurrent()
-            return
         }
-        // Animated transaction so the carousel's scrollPosition slides to the
-        // next page (programmatic position changes don't animate on their own).
-        withAnimation(.easeInOut(duration: 0.35)) {
-            index += 1
-            refreshCurrent()
-        }
-        pendingAdvanceRemovals.insert(removedID)
+        // Keep the departed page blank while its removal transition runs, so
+        // the photo can't flash back once the album flight lands.
+        guard heroDepartedID == removedID else { return }
         Task { [weak self] in
-            try? await Task.sleep(for: Self.advanceRemovalDelay)
-            guard let self else { return }
-            // The page is about to go (or the photo is staying after all) —
-            // either way its hero image is no longer mid-departure.
-            if self.heroDepartedID == removedID { self.heroDepartedID = nil }
-            guard self.pendingAdvanceRemovals.remove(removedID) != nil else { return }
-            // Skip if the user paged back onto it; the next rebuild filters it.
-            guard let i = self.queue.firstIndex(of: removedID), i != self.index else { return }
-            self.queue.remove(at: i)
-            if i < self.index { self.index -= 1 }
+            try? await Task.sleep(for: .milliseconds(600))
+            guard let self, self.heroDepartedID == removedID else { return }
+            self.heroDepartedID = nil
         }
     }
 
@@ -957,11 +934,9 @@ final class SortSessionViewModel {
         restoreToQueue(id)
     }
 
-    /// Bring an undone asset back as the current photo. If its deferred
-    /// advance-removal hasn't fired yet it's still in the queue — cancel the
-    /// removal and point back at it instead of inserting a duplicate.
+    /// Bring an undone asset back as the current photo, guarding against a
+    /// duplicate insert if it somehow never left the queue.
     private func restoreToQueue(_ id: String) {
-        pendingAdvanceRemovals.remove(id)
         if heroDepartedID == id { heroDepartedID = nil }
         if !queue.contains(id) {
             queue.insert(id, at: min(index, queue.count))

@@ -125,6 +125,10 @@ private struct PhotoPage: View {
         ZStack {
             RoundedRectangle(cornerRadius: 16)
                 .fill(Color(.secondarySystemBackground))
+                // Fades with the backdrop when the photo departs on a flight,
+                // so no card remnant lingers around where the photo was.
+                .opacity(isDeparted ? 0 : 1)
+                .animation(.easeOut(duration: 0.15), value: isDeparted)
 
             switch phase {
             case .loaded:
