@@ -61,6 +61,20 @@ final class SortSessionViewModel {
     /// the sort grid with reduced opacity.
     private(set) var pinnedAlbumInfos: [AlbumInfo] = []
 
+    /// Photos added to each album during this app run, most recent first.
+    /// Album preview grids show these at the front regardless of creation
+    /// date; the next launch falls back to natural (creation-date) order.
+    private(set) var recentAddsByAlbum: [String: [String]] = [:]
+
+    /// App-lifetime backing for `recentAddsByAlbum`, shared across sort
+    /// sessions so re-entering the screen keeps the session's ordering.
+    private static var sessionRecentAdds: [String: [String]] = [:]
+
+    /// Destination-album order per context, frozen for the app run so sorting
+    /// items doesn't reshuffle the grid mid-flow. The next launch re-evaluates
+    /// counts from scratch.
+    private static var frozenAlbumOrder: [PersistentIdentifier: [String]] = [:]
+
     enum SortAction {
         case sorted(localID: String, albumID: String)
         case sortedMulti(localID: String, adds: [String], removes: [String])
@@ -93,6 +107,7 @@ final class SortSessionViewModel {
     init(context: OrgContext, modelContext: ModelContext) {
         self.context = context
         self.modelContext = modelContext
+        self.recentAddsByAlbum = Self.sessionRecentAdds
     }
 
     // MARK: - Lifecycle
@@ -186,9 +201,32 @@ final class SortSessionViewModel {
         })
         var infos = context.albumLocalIDs.compactMap { byID[$0] }
         if context.autoSortAlbumsByCount {
-            infos.sort { $0.assetCount > $1.assetCount }
+            infos = Self.frozenCountOrder(infos, contextID: context.persistentModelID)
         }
         albumInfos = infos
+    }
+
+    /// Sort by count (most to least), but freeze the result per context for
+    /// the app run: re-sorting mid-session would shuffle albums under the
+    /// user's fingers while they sort. Albums that join the context later are
+    /// slotted in by count and then frozen too.
+    private static func frozenCountOrder(_ infos: [AlbumInfo], contextID: PersistentIdentifier) -> [AlbumInfo] {
+        guard let order = frozenAlbumOrder[contextID] else {
+            let sorted = infos.sorted { $0.assetCount > $1.assetCount }
+            frozenAlbumOrder[contextID] = sorted.map(\.id)
+            return sorted
+        }
+        let rank = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($1, $0) })
+        let sorted = infos.sorted { a, b in
+            switch (rank[a.id], rank[b.id]) {
+            case let (ra?, rb?): ra < rb
+            case (.some, nil): true
+            case (nil, .some): false
+            case (nil, nil): a.assetCount > b.assetCount
+            }
+        }
+        frozenAlbumOrder[contextID] = sorted.map(\.id)
+        return sorted
     }
 
     private func refreshPinnedAlbumInfos() {
@@ -331,12 +369,14 @@ final class SortSessionViewModel {
             if isMember {
                 try await AlbumService.remove(asset, from: collection, assumeMember: true)
                 evaluator.noteRemoved(asset: asset.localIdentifier, from: albumLocalID)
+                noteSessionRemovals([asset.localIdentifier], albumID: albumLocalID)
                 applyLocalMembershipChange(albumID: albumLocalID, delta: -1)
                 recomputeMemberships()
                 Haptics.tap()
             } else {
                 try await AlbumService.add(asset, to: collection, assumeNotMember: true)
                 evaluator.noteAdded(asset: asset.localIdentifier, to: albumLocalID)
+                noteSessionAdds([asset.localIdentifier], albumID: albumLocalID)
                 applyLocalMembershipChange(albumID: albumLocalID, delta: +1)
                 if !wasSatisfied {
                     let newMemberships = evaluator.albumMemberships(for: asset, in: context)
@@ -347,10 +387,14 @@ final class SortSessionViewModel {
                         return
                     }
                 }
+                // Not advancing — the photo stays current, so its hero image
+                // must come back once the in-progress flight lands.
+                if heroDepartedID == asset.localIdentifier { heroDepartedID = nil }
                 recomputeMemberships()
                 Haptics.tap()
             }
         } catch {
+            if heroDepartedID == asset.localIdentifier { heroDepartedID = nil }
             Haptics.warning()
             print("toggleAlbum failed: \(error)")
         }
@@ -379,9 +423,6 @@ final class SortSessionViewModel {
     private func applyLocalMembershipChange(albumID: String, delta: Int) {
         if let i = albumInfos.firstIndex(where: { $0.id == albumID }) {
             albumInfos[i] = albumInfos[i].adjustingCount(by: delta)
-            if context.autoSortAlbumsByCount {
-                albumInfos.sort { $0.assetCount > $1.assetCount }
-            }
         }
         if let i = pinnedAlbumInfos.firstIndex(where: { $0.id == albumID }) {
             pinnedAlbumInfos[i] = pinnedAlbumInfos[i].adjustingCount(by: delta)
@@ -389,6 +430,24 @@ final class SortSessionViewModel {
         if let i = extraAlbumInfos.firstIndex(where: { $0.id == albumID }) {
             extraAlbumInfos[i] = extraAlbumInfos[i].adjustingCount(by: delta)
         }
+    }
+
+    /// Record photos added to an album this session so its preview grid can
+    /// surface them first, ahead of the natural creation-date order.
+    private func noteSessionAdds(_ ids: [String], albumID: String) {
+        guard !ids.isEmpty else { return }
+        var list = Self.sessionRecentAdds[albumID] ?? []
+        list.removeAll { ids.contains($0) }
+        list.insert(contentsOf: ids, at: 0)
+        Self.sessionRecentAdds[albumID] = list
+        recentAddsByAlbum = Self.sessionRecentAdds
+    }
+
+    private func noteSessionRemovals(_ ids: [String], albumID: String) {
+        guard !ids.isEmpty, var list = Self.sessionRecentAdds[albumID] else { return }
+        list.removeAll { ids.contains($0) }
+        Self.sessionRecentAdds[albumID] = list
+        recentAddsByAlbum = Self.sessionRecentAdds
     }
 
     func activateMultiSelect() async {
@@ -442,6 +501,7 @@ final class SortSessionViewModel {
             do {
                 try await AlbumService.add(asset, to: collection, assumeNotMember: true)
                 evaluator.noteAdded(asset: asset.localIdentifier, to: albumID)
+                noteSessionAdds([asset.localIdentifier], albumID: albumID)
                 applyLocalMembershipChange(albumID: albumID, delta: +1)
             } catch {}
         }
@@ -450,6 +510,7 @@ final class SortSessionViewModel {
             do {
                 try await AlbumService.remove(asset, from: collection, assumeMember: true)
                 evaluator.noteRemoved(asset: asset.localIdentifier, from: albumID)
+                noteSessionRemovals([asset.localIdentifier], albumID: albumID)
                 applyLocalMembershipChange(albumID: albumID, delta: -1)
             } catch {}
         }
@@ -513,6 +574,7 @@ final class SortSessionViewModel {
             }
             if !added.isEmpty {
                 addedByAlbum[albumID] = added
+                noteSessionAdds(added, albumID: albumID)
                 applyLocalMembershipChange(albumID: albumID, delta: added.count)
             }
         }
@@ -532,6 +594,7 @@ final class SortSessionViewModel {
             }
             if !removed.isEmpty {
                 removedByAlbum[albumID] = removed
+                noteSessionRemovals(removed, albumID: albumID)
                 applyLocalMembershipChange(albumID: albumID, delta: -removed.count)
             }
         }
@@ -645,6 +708,7 @@ final class SortSessionViewModel {
         }
 
         if !addedIDs.isEmpty {
+            noteSessionAdds(addedIDs, albumID: albumID)
             applyLocalMembershipChange(albumID: albumID, delta: addedIDs.count)
         }
 
@@ -748,6 +812,7 @@ final class SortSessionViewModel {
                     evaluator.noteRemoved(asset: id, from: albumID)
                 } catch {}
             }
+            noteSessionRemovals(photoIDs, albumID: albumID)
             applyLocalMembershipChange(albumID: albumID, delta: -photoIDs.count)
         }
 
@@ -760,6 +825,7 @@ final class SortSessionViewModel {
                     evaluator.noteAdded(asset: id, to: albumID)
                 } catch {}
             }
+            noteSessionAdds(photoIDs, albumID: albumID)
             applyLocalMembershipChange(albumID: albumID, delta: photoIDs.count)
         }
 
@@ -806,17 +872,44 @@ final class SortSessionViewModel {
 
     // MARK: - Advance / back
 
-    /// Advance to the next asset. Removes the current asset from the queue if
-    /// `removeCurrent` is true (used after satisfy / skip / delete).
-    /// Synchronous so callers' post-await state changes batch into one SwiftUI
-    /// update instead of splitting across a suspension point.
+    /// Photo whose hero image departed on a flight to an album cell. Its
+    /// carousel page hides the photo (the flight draws it) and fades the rest
+    /// of the card, staying blank through its removal transition — so the
+    /// photo never shows twice. Cleared wherever the photo stays current
+    /// instead (no advance, failed write, undo).
+    private(set) var heroDepartedID: String?
+
+    /// Called when an album flight launches with the current photo, just
+    /// before the album toggle that will advance past it.
+    func noteHeroFlightDeparture(_ id: String?) {
+        heroDepartedID = id
+    }
+
+    /// Advance past the current asset. When `removeCurrent` is true (used
+    /// after satisfy / skip / delete) the item is removed in an animated
+    /// transaction: its carousel page fades out in place while the next photo
+    /// slides over to take its spot, and the thumbnail strip diffs the same
+    /// way. Synchronous so callers' post-await state changes batch into one
+    /// SwiftUI update instead of splitting across a suspension point.
     func advance(removingCurrent removeCurrent: Bool) {
-        if removeCurrent && index < queue.count {
-            queue.remove(at: index)
-        } else {
+        guard removeCurrent, index < queue.count else {
             index += 1
+            refreshCurrent()
+            return
         }
-        refreshCurrent()
+        let removedID = queue[index]
+        withAnimation(.interactiveSpring(duration: 0.25)) {
+            queue.remove(at: index)
+            refreshCurrent()
+        }
+        // Keep the departed page blank while its removal transition runs, so
+        // the photo can't flash back once the album flight lands.
+        guard heroDepartedID == removedID else { return }
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(600))
+            guard let self, self.heroDepartedID == removedID else { return }
+            self.heroDepartedID = nil
+        }
     }
 
     // MARK: - Skip
@@ -838,7 +931,17 @@ final class SortSessionViewModel {
             modelContext.delete(row)
             try? modelContext.save()
         }
-        queue.insert(id, at: index)
+        restoreToQueue(id)
+    }
+
+    /// Bring an undone asset back as the current photo, guarding against a
+    /// duplicate insert if it somehow never left the queue.
+    private func restoreToQueue(_ id: String) {
+        if heroDepartedID == id { heroDepartedID = nil }
+        if !queue.contains(id) {
+            queue.insert(id, at: min(index, queue.count))
+        }
+        if let i = queue.firstIndex(of: id) { index = i }
         refreshCurrent()
     }
 
@@ -861,8 +964,7 @@ final class SortSessionViewModel {
             modelContext.delete(row)
             try? modelContext.save()
         }
-        queue.insert(id, at: index)
-        refreshCurrent()
+        restoreToQueue(id)
     }
 
     // MARK: - Undo (sort)
@@ -873,10 +975,10 @@ final class SortSessionViewModel {
         do {
             try await AlbumService.remove(asset, from: collection, assumeMember: true)
             evaluator.noteRemoved(asset: id, from: albumID)
+            noteSessionRemovals([id], albumID: albumID)
             applyLocalMembershipChange(albumID: albumID, delta: -1)
         } catch {}
-        queue.insert(id, at: index)
-        refreshCurrent()
+        restoreToQueue(id)
     }
 
     private func undoSortMulti(id: String, adds: [String], removes: [String]) async {
@@ -886,6 +988,7 @@ final class SortSessionViewModel {
             do {
                 try await AlbumService.remove(asset, from: collection, assumeMember: true)
                 evaluator.noteRemoved(asset: id, from: albumID)
+                noteSessionRemovals([id], albumID: albumID)
                 applyLocalMembershipChange(albumID: albumID, delta: -1)
             } catch {}
         }
@@ -894,11 +997,11 @@ final class SortSessionViewModel {
             do {
                 try await AlbumService.add(asset, to: collection, assumeNotMember: true)
                 evaluator.noteAdded(asset: id, to: albumID)
+                noteSessionAdds([id], albumID: albumID)
                 applyLocalMembershipChange(albumID: albumID, delta: +1)
             } catch {}
         }
-        queue.insert(id, at: index)
-        refreshCurrent()
+        restoreToQueue(id)
     }
 
     func undo() async {
@@ -927,12 +1030,53 @@ final class SortSessionViewModel {
     /// an active sort session the vast majority of these are self-write leaks
     /// (the `pendingSelfWrites` counter can't reliably suppress every PhotoKit
     /// callback). A full queue rebuild here would cost hundreds of milliseconds
-    /// and stutter the UI, so we only refresh the current asset's metadata.
-    /// Actual queue rebuilds are deferred to explicit user actions: first load
-    /// (`start`), view reappear (`refreshAfterReappear`), and context edit
-    /// dismiss (`rebuildQueue`).
+    /// and stutter the UI, so we only refresh the current asset's metadata and
+    /// schedule a coalesced album-count refresh. Actual queue rebuilds are
+    /// deferred to explicit user actions: first load (`start`), view reappear
+    /// (`refreshAfterReappear`), and context edit dismiss (`rebuildQueue`).
     func handleLibraryChange() {
         refreshCurrent()
+        scheduleAlbumCountRefresh()
+    }
+
+    private var albumCountRefreshPending = false
+
+    /// Coalesces bursts of change notifications — on large libraries (iCloud
+    /// sync, launch indexing) PhotoKit can fire many per second, and doing a
+    /// fetch per tick would hammer it. At most one refresh per window, with
+    /// the PhotoKit work off the main actor.
+    private func scheduleAlbumCountRefresh() {
+        guard !albumCountRefreshPending else { return }
+        albumCountRefreshPending = true
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard let self else { return }
+            self.albumCountRefreshPending = false
+            await self.refreshAlbumCountsNow()
+        }
+    }
+
+    /// Re-reads counts for the cached album snapshots in place — order is
+    /// preserved, so the frozen sort order is untouched. Cheap: one collection
+    /// fetch (off-main) using estimated counts, no per-album asset
+    /// enumeration. Covers changes that bypass the local count patching:
+    /// external library edits and removals made in the album-contents sheet
+    /// (whose self-writes don't bump `changeTick`, so the sheet's dismiss
+    /// calls `refreshAlbumCounts()` directly).
+    func refreshAlbumCounts() {
+        Task { await refreshAlbumCountsNow() }
+    }
+
+    private func refreshAlbumCountsNow() async {
+        let ids = (albumInfos + pinnedAlbumInfos + extraAlbumInfos).map(\.id)
+        guard !ids.isEmpty else { return }
+        let infos: [AlbumInfo] = await Task.detached(priority: .utility) {
+            AlbumService.collections(for: ids).map { AlbumInfo(collection: $0) }
+        }.value
+        let byID = Dictionary(infos.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        albumInfos = albumInfos.map { byID[$0.id] ?? $0 }
+        pinnedAlbumInfos = pinnedAlbumInfos.map { byID[$0.id] ?? $0 }
+        extraAlbumInfos = extraAlbumInfos.map { byID[$0.id] ?? $0 }
     }
 
     /// Updates the default context's album IDs without counting assets per

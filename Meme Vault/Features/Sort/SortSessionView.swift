@@ -40,6 +40,10 @@ struct SortSessionView: View {
     /// freshly-activated anchor page can't clobber it; the flight prefers it.
     @State private var preloadedHeroID: String?
     @State private var preloadedHeroImage: UIImage?
+    /// Flies a copy of the hero photo into an album cell's first preview slot
+    /// when a tap sorts it there. The media region feeds it the hero image and
+    /// frame; the album grid cells feed it their slot frames.
+    @State private var albumFlight = AlbumFlightCoordinator()
 
     /// In bulk mode the selection count lives in the nav bar (the grid scrolls
     /// under the bar, so there's no room for an in-content header).
@@ -253,6 +257,7 @@ struct SortSessionView: View {
                 vm: vm,
                 heroForegroundSuppressed: $heroForegroundSuppressed,
                 anchor: bulkAnchor,
+                albumFlight: albumFlight,
                 preloadedHeroID: preloadedHeroID,
                 preloadedHeroImage: preloadedHeroImage,
                 topSafeInset: topSafeInset,
@@ -275,13 +280,18 @@ struct SortSessionView: View {
             AlbumListView(
                 vm: vm,
                 columnCount: columnCount,
-                bottomSafeInset: bottomSafeInset
+                bottomSafeInset: bottomSafeInset,
+                albumFlight: albumFlight
             )
         }
         // No bottom padding: the album list extends to the screen edge and its
         // content inset respects the home indicator. Constant top padding so the
         // layout doesn't shift when toggling bulk mode.
         .padding(.top, 4)
+        // Topmost, spanning the whole sort screen: hosts the hero → album-slot
+        // flight image so it can travel from the carousel down into the album
+        // grid. Transparent and non-interactive otherwise.
+        .overlay { HeroFlightOverlay(layer: albumFlight.layer) }
         .alert(
             "No Destination Album",
             isPresented: Binding(
@@ -321,6 +331,9 @@ private struct MediaRegionView: View {
     /// the same action that toggles bulk mode (before the body commits).
     @Binding var heroForegroundSuppressed: Bool
     let anchor: BulkGridAnchor
+    /// Receives the hero photo's latest image and on-screen frame, for the
+    /// hero → album-slot flight that runs when a tap sorts the photo.
+    let albumFlight: AlbumFlightCoordinator
     /// Pre-decoded full-aspect image for a scroll-anchored exit, with the asset it
     /// belongs to. Preferred by the flight over `heroImage` so the anchor photo
     /// zooms fit→fill even before PhotoCardView has loaded it.
@@ -406,12 +419,21 @@ private struct MediaRegionView: View {
                     onActiveImage: { id, image in
                         heroImageID = id
                         heroImage = image
+                        albumFlight.heroImageID = id
+                        albumFlight.heroImage = image
                     },
                     suppressForeground: heroForegroundSuppressed,
+                    departedID: albumFlight.flyingPhotoID ?? vm.heroDepartedID,
                     isForeground: !vm.isBulkMode
                 )
                 .frame(maxWidth: .infinity, alignment: .top)
                 .frame(height: photoHeight - MorphingThumbnailGrid.stripBandHeight)
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+                    // The carousel insets its photo 24pt from each side (the same
+                    // margin MorphingThumbnailGrid's heroRect uses); the flight
+                    // aspect-fits the image within that page rect.
+                    albumFlight.heroFrame = frame.insetBy(dx: 24, dy: 0)
+                }
                 .opacity(vm.isBulkMode ? 0 : 1)
                 .allowsHitTesting(!vm.isBulkMode)
 
@@ -629,6 +651,7 @@ private struct AlbumListView: View {
     let vm: SortSessionViewModel
     let columnCount: Int
     let bottomSafeInset: CGFloat
+    let albumFlight: AlbumFlightCoordinator
 
     @State private var viewingAlbum: AlbumSheetItem?
 
@@ -642,25 +665,38 @@ private struct AlbumListView: View {
         let bulkDirect = vm.isBulkMode && !vm.isMultiSelectActive
         ScrollView {
             LazyVGrid(columns: albumColumns, spacing: 8) {
+
                 AlbumsItems(
                     infos: infos,
                     bulkDirect: bulkDirect,
                     isMember: { info in memberIDs.contains(info.id) },
                     shouldFadeIfNotMember: false,
+                    recentAdds: vm.recentAddsByAlbum,
+                    albumFlight: albumFlight,
                     viewingAlbum: $viewingAlbum,
                 ) { info in
                     if vm.isBulkMode {
                         await vm.bulkAlbumTap(info.id)
                     } else {
+                        // Sorting (not removing) the photo: fly the hero image
+                        // into the album preview's first slot as it's added.
+                        // When the flight launches, the carousel page hands its
+                        // photo over to it (goes blank, backdrop fades).
+                        if !vm.isMultiSelectActive, !memberIDs.contains(info.id),
+                           albumFlight.fly(toAlbum: info.id, heroID: vm.currentAssetID) {
+                            vm.noteHeroFlightDeparture(vm.currentAssetID)
+                        }
                         await vm.toggleAlbum(info.id)
                     }
                 }
-                
+
                 AlbumsItems(
                     infos: vm.pinnedAlbumInfos,
                     bulkDirect: bulkDirect,
                     isMember: { info in vm.memberships.first { $0.id == info.id }?.isMember ?? false },
                     shouldFadeIfNotMember: true,
+                    recentAdds: vm.recentAddsByAlbum,
+                    albumFlight: albumFlight,
                     viewingAlbum: $viewingAlbum,
                 ) { info in
                     if vm.isBulkMode {
@@ -672,18 +708,21 @@ private struct AlbumListView: View {
                         await vm.toggleAlbum(info.id)
                     }
                 }
-                
+
                 AlbumsItems(
                     infos: vm.extraAlbumInfos,
                     bulkDirect: bulkDirect,
                     isMember: { info in memberIDs.contains(info.id) },
                     shouldFadeIfNotMember: true,
+                    recentAdds: vm.recentAddsByAlbum,
+                    albumFlight: albumFlight,
                     viewingAlbum: $viewingAlbum,
                 ) { info in
                     await vm.toggleAlbum(info.id)
                 }
             }
             .padding(.horizontal)
+            .animation(.easeInOut(duration: 0.2), value: columnCount)
             .animation(.easeInOut(duration: 0.25), value: Set(infos.map(\.id)))
             .animation(.easeInOut(duration: 0.25), value: Set(vm.pinnedAlbumInfos.map(\.id)))
             .animation(.easeInOut(duration: 0.25), value: vm.extraAlbumIDs)
@@ -693,7 +732,9 @@ private struct AlbumListView: View {
         // so the resting content and scroll indicator stay within the safe area.
         .contentMargins(.bottom, bottomSafeInset)
         .ignoresSafeArea(.container, edges: .bottom)
-        .sheet(item: $viewingAlbum) { album in
+        // Removals made in the contents sheet are self-writes that don't bump
+        // `changeTick`, so refresh the counts (and thus the previews) here.
+        .sheet(item: $viewingAlbum, onDismiss: { vm.refreshAlbumCounts() }) { album in
             PhotoCollectionView(mode: .album(album))
         }
     }
@@ -704,9 +745,13 @@ private struct AlbumsItems: View {
     let bulkDirect: Bool
     let isMember: (AlbumInfo) -> Bool
     let shouldFadeIfNotMember: Bool
+    /// Per-album photos added this session, surfaced first in the previews.
+    var recentAdds: [String: [String]] = [:]
+    /// Collects each cell's first-slot frame for the hero → album-slot flight.
+    var albumFlight: AlbumFlightCoordinator? = nil
     @Binding var viewingAlbum: AlbumSheetItem?
     let onTap: (AlbumInfo) async -> Void
-    
+
     var body: some View {
         ForEach(infos) { info in
             let isMember = self.isMember(info)
@@ -720,10 +765,18 @@ private struct AlbumsItems: View {
                     title: info.title,
                     count: info.assetCount,
                     isMember: bulkDirect ? false : isMember,
+                    recentIDs: recentAdds[info.id] ?? [],
+                    hiddenThumbID: albumFlight?.flyingToAlbumID == info.id
+                        ? albumFlight?.flyingPhotoID
+                        : nil,
+                    onFirstSlotFrame: albumFlight.map { flight in
+                        { flight.slotFrames[info.id] = $0 }
+                    }
                 )
                 .opacity((shouldFadeIfNotMember && !isMember) ? 0.6 : 1)
             }
             .buttonStyle(.plain)
+            .onDisappear { albumFlight?.slotFrames.removeValue(forKey: info.id) }
             .contextMenu {
                 Button("Sort to Album", systemImage: "rectangle.portrait.and.arrow.forward") {
                     Task {
@@ -737,5 +790,119 @@ private struct AlbumsItems: View {
             }
             .transition(.opacity.combined(with: .offset(y: 20)))
         }
+    }
+}
+
+// MARK: - Album flight
+
+/// Coordinates the hero → album-cell flight: when a tap sorts the current
+/// photo into an album, a floating copy of the hero image flies from the
+/// carousel into that album preview's first slot — the same UIKit flight
+/// technique as the bulk-mode hero zoom, so it stays off SwiftUI's graph.
+/// The media region reports the hero image/frame, the album grid cells report
+/// their first-slot frames, and `fly` animates between them in the overlay.
+@MainActor
+@Observable
+final class AlbumFlightCoordinator {
+    /// Overlay spanning the sort screen that hosts the flight image view.
+    let layer = FlightLayer()
+    /// Latest full-aspect hero image and the asset it belongs to.
+    @ObservationIgnored var heroImage: UIImage?
+    @ObservationIgnored var heroImageID: String?
+    /// Global frame of the carousel's photo page rect (inset by its margin).
+    @ObservationIgnored var heroFrame: CGRect = .zero
+    /// Global frame of each album preview's first slot, keyed by album ID.
+    @ObservationIgnored var slotFrames: [String: CGRect] = [:]
+
+    /// Set while a flight is airborne: the destination album and the photo in
+    /// transit. The album cell keeps that thumbnail's slot blank until the
+    /// flight lands, so the photo never shows twice at once.
+    private(set) var flyingToAlbumID: String?
+    private(set) var flyingPhotoID: String?
+    /// Distinguishes overlapping flights so a stale completion doesn't clear
+    /// a newer flight's in-transit state.
+    @ObservationIgnored private var flightGeneration = 0
+
+    private static let flightDuration: TimeInterval = 0.25
+    private static let landingFadeDuration: TimeInterval = 0.12
+
+    /// Returns true when the flight actually launched (album cell on screen,
+    /// image available) — the caller hides the carousel photo only then.
+    @discardableResult
+    func fly(toAlbum albumID: String, heroID: String?) -> Bool {
+        let host = layer.view
+        guard let heroID, host.window != nil,
+              let slotGlobal = slotFrames[albumID],
+              heroFrame.width > 0
+        else { return false }
+
+        // Prefer the full-aspect hero image (fit→fill morph, like the bulk
+        // hero zoom); fall back to the square strip thumbnail (fill→fill)
+        // when it hasn't decoded yet.
+        let displayImage = heroImageID == heroID ? heroImage : nil
+        let thumbSide = 80 * host.traitCollection.displayScale
+        let image = displayImage ?? ImageLoader.shared.cachedThumbnail(
+            localID: heroID,
+            targetSize: CGSize(width: thumbSide, height: thumbSide)
+        )
+        guard let image else { return false }
+
+        // SwiftUI's global space is the window's coordinate space; convert
+        // both endpoints into the overlay and skip if the slot scrolled away.
+        let fromGlobal = displayImage != nil
+            ? Self.aspectFitRect(for: image.size, in: heroFrame)
+            : heroFrame
+        let from = host.convert(fromGlobal, from: nil)
+        let to = host.convert(slotGlobal, from: nil)
+        guard host.bounds.intersects(to) else { return false }
+
+        // Mark the photo as in transit so the album cell leaves its slot
+        // blank until the flight lands (all guards passed — the flight is on).
+        flightGeneration += 1
+        let generation = flightGeneration
+        flyingToAlbumID = albumID
+        flyingPhotoID = heroID
+
+        let fv = UIImageView(image: image)
+        fv.contentMode = .scaleAspectFill
+        fv.clipsToBounds = true
+        fv.frame = from
+        host.addSubview(fv)
+
+        let corner = CABasicAnimation(keyPath: "cornerRadius")
+        corner.fromValue = 0
+        corner.toValue = 6
+        corner.duration = Self.flightDuration
+        corner.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        fv.layer.add(corner, forKey: "cornerRadius")
+        fv.layer.cornerRadius = 6
+
+        UIView.animate(withDuration: Self.flightDuration, delay: 0, options: [.curveEaseInOut]) {
+            fv.frame = to
+        } completion: { _ in
+            // Landed: reveal the real thumbnail beneath, then fade the flight
+            // image out over it for a seamless handoff.
+            if self.flightGeneration == generation {
+                self.flyingToAlbumID = nil
+                self.flyingPhotoID = nil
+            }
+            UIView.animate(withDuration: Self.landingFadeDuration, delay: 0, options: [.curveEaseOut]) {
+                fv.alpha = 0
+            } completion: { _ in
+                fv.removeFromSuperview()
+            }
+        }
+        return true
+    }
+
+    /// The rect an `imageSize` photo occupies when aspect-fit (letterboxed)
+    /// inside `bounds`, centered — where an aspectFill view shows the whole
+    /// photo with no crop, matching the hero's appearance.
+    private static func aspectFitRect(for imageSize: CGSize, in bounds: CGRect) -> CGRect {
+        guard imageSize.width > 0, imageSize.height > 0 else { return bounds }
+        let scale = min(bounds.width / imageSize.width, bounds.height / imageSize.height)
+        let w = imageSize.width * scale
+        let h = imageSize.height * scale
+        return CGRect(x: bounds.midX - w / 2, y: bounds.midY - h / 2, width: w, height: h)
     }
 }

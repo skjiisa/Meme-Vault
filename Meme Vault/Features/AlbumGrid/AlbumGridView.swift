@@ -18,6 +18,17 @@ struct AlbumGridCell: View {
     let title: String
     let count: Int
     var isMember: Bool = false
+    /// Photos sorted into this album during this app run, most recent first.
+    /// Shown at the front of the preview regardless of creation-date order;
+    /// the next launch reverts to the natural order.
+    var recentIDs: [String] = []
+    /// Thumbnail to render invisible (layout preserved) while the hero-flight
+    /// image is still travelling toward this cell — its slot stays blank until
+    /// the flight lands, instead of showing a duplicate under the flight.
+    var hiddenThumbID: String? = nil
+    /// Reports the global frame of the preview's first (top-left) slot, so
+    /// the sort screen can fly the hero image into it.
+    var onFirstSlotFrame: ((CGRect) -> Void)? = nil
 
     @State private var thumbnails: [AlbumThumbnail] = []
 
@@ -44,7 +55,8 @@ struct AlbumGridCell: View {
                                     .scaledToFill()
                                     .frame(width: cellSize, height: cellSize)
                                     .clipped()
-                                    .transition(.opacity)
+                                    .opacity(thumb.id == hiddenThumbID ? 0 : 1)
+                                    .transition(.scale(scale: 0.8).combined(with: .opacity))
                             }
                             ForEach(min(thumbnails.count, 4)..<4, id: \.self) { _ in
                                 Color(.tertiarySystemFill)
@@ -71,6 +83,11 @@ struct AlbumGridCell: View {
                 }
             }
             .aspectRatio(1, contentMode: .fit)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+                guard let onFirstSlotFrame else { return }
+                let slot = max(0, (frame.width - 2) / 2)
+                onFirstSlotFrame(CGRect(x: frame.minX, y: frame.minY, width: slot, height: slot))
+            }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -87,24 +104,64 @@ struct AlbumGridCell: View {
                 thumbnails = await loadThumbnails()
             }
         }
-        .onChange(of: count) {
-            Task { thumbnails = await loadThumbnails() }
+        .onChange(of: count) { reloadThumbnails() }
+        .onChange(of: recentIDs) { reloadThumbnails() }
+    }
+
+    /// Animated reload for membership changes: the incoming thumbnail scales
+    /// in while the existing ones shift to their new slots.
+    private func reloadThumbnails() {
+        Task {
+            let new = await loadThumbnails()
+            guard new != thumbnails else { return }
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                thumbnails = new
+            }
         }
     }
 
     private func loadThumbnails() async -> [AlbumThumbnail] {
         let albumID = self.albumID
+        let recentIDs = Array(self.recentIDs.prefix(4))
         let targetSize = CGSize(width: 200, height: 200)
         let loader = ImageLoader.shared
 
+        // Session adds lead the preview (most recent first); the remaining
+        // slots fill with the album's newest assets by creation date.
         let assets: [PHAsset] = await Task.detached(priority: .userInitiated) {
-            guard let collection = AlbumService.collection(for: albumID) else { return [] }
-            let opts = PHFetchOptions()
-            opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-            opts.fetchLimit = 4
-            let result = PHAsset.fetchAssets(in: collection, options: opts)
             var out: [PHAsset] = []
-            for i in 0..<result.count { out.append(result.object(at: i)) }
+            if !recentIDs.isEmpty {
+                let fetched = PHAsset.fetchAssets(withLocalIdentifiers: recentIDs, options: nil)
+                var byID: [String: PHAsset] = [:]
+                fetched.enumerateObjects { asset, _, _ in byID[asset.localIdentifier] = asset }
+                // A session add can be removed again (album-contents sheet,
+                // Photos app) — keep only photos still in the album.
+                out = recentIDs.compactMap { byID[$0] }.filter { asset in
+                    var inAlbum = false
+                    let containing = PHAssetCollection.fetchAssetCollectionsContaining(
+                        asset, with: .album, options: nil
+                    )
+                    containing.enumerateObjects { collection, _, stop in
+                        if collection.localIdentifier == albumID {
+                            inAlbum = true
+                            stop.pointee = true
+                        }
+                    }
+                    return inAlbum
+                }
+            }
+            if out.count < 4 {
+                guard let collection = AlbumService.collection(for: albumID) else { return out }
+                let opts = PHFetchOptions()
+                opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+                opts.fetchLimit = 4 + out.count
+                let result = PHAsset.fetchAssets(in: collection, options: opts)
+                let seen = Set(out.map(\.localIdentifier))
+                for i in 0..<result.count where out.count < 4 {
+                    let asset = result.object(at: i)
+                    if !seen.contains(asset.localIdentifier) { out.append(asset) }
+                }
+            }
             return out
         }.value
 

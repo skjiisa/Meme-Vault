@@ -9,7 +9,9 @@ import Foundation
 import Photos
 
 /// Lightweight, value-typed snapshot of a `PHAssetCollection` for use in views.
-struct AlbumInfo: Identifiable, Hashable, Sendable {
+/// `nonisolated`: pure data constructed on whatever queue fetched the
+/// collection (queue rebuilds and count refreshes run off the main actor).
+nonisolated struct AlbumInfo: Identifiable, Hashable, Sendable {
     let id: String          // PHAssetCollection.localIdentifier
     let title: String
     let assetCount: Int
