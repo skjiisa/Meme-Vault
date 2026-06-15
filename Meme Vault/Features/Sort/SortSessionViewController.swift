@@ -346,15 +346,18 @@ final class SortSessionViewController: UIViewController {
         button(undoButton, "arrow.uturn.backward") { [weak self] in Task { await self?.vm.undo() } }
         button(deleteButton, "trash") { [weak self] in
             guard let self else { return }
+            self.commitVisiblePhotoIfBrowsing()
             Task { self.vm.isBulkMode ? await self.vm.bulkQueueDelete() : await self.vm.queueDelete() }
         }
         deleteButton.tintColor = .systemRed
         button(skipButton, "arrow.right.to.line") { [weak self] in
             guard let self else { return }
+            self.commitVisiblePhotoIfBrowsing()
             Task { self.vm.isBulkMode ? await self.vm.bulkSkip() : await self.vm.skip() }
         }
         button(favoriteButton, "heart") { [weak self] in
             guard let self else { return }
+            self.commitVisiblePhotoIfBrowsing()
             Task { self.vm.isBulkMode ? await self.vm.bulkToggleFavorite() : await self.vm.toggleFavorite() }
         }
         favoriteButton.tintColor = .secondaryLabel
@@ -472,11 +475,20 @@ final class SortSessionViewController: UIViewController {
         // Top-level state.
         updateState(isLoading: isLoading, queueEmpty: queue.isEmpty, hasCurrent: hasCurrent, isBulk: isBulk)
 
+        // An undo-restore re-inserts an item into the queue and jumps to it. When
+        // we weren't already on that item, animating the insertion AND scrolling to
+        // it looks janky (a whip-scroll over the inserted cell), so for a restore we
+        // position both collections without animation — the item just appears in
+        // place and the carousel is already there.
+        let added = (queue != lastQueue) ? Set(queue).subtracting(lastQueue) : []
+        let isRestore = currentID.map { added.contains($0) } ?? false
+
         // Queue → both collections (skip while a bulk-mode morph is the only change).
         if queue != lastQueue {
             lastQueue = queue
-            carousel.applySnapshot(queue, animated: didInitialContent)
-            morph.applySnapshot(queue, animated: didInitialContent)
+            let anim = didInitialContent && !isRestore
+            carousel.applySnapshot(queue, animated: anim)
+            morph.applySnapshot(queue, animated: anim)
         }
 
         // Bulk-mode transitions are run synchronously in toggleBulk(); here we only
@@ -488,8 +500,8 @@ final class SortSessionViewController: UIViewController {
         // Current asset → carousel page + strip current cell.
         if currentID != lastCurrentID {
             lastCurrentID = currentID
-            carousel.setCurrent(currentID, animated: !isBulk)
-            morph.updateCurrent(currentID)
+            carousel.setCurrent(currentID, animated: !isBulk && !isRestore)
+            morph.updateCurrent(currentID, animated: !isRestore)
         }
 
         // Bulk selection → strip cells.
@@ -617,7 +629,15 @@ final class SortSessionViewController: UIViewController {
 
     // MARK: - Album tap routing
 
+    /// Before a single-photo action (sort / skip / delete / favorite), settle the
+    /// carousel on its most-visible page and commit it to the VM — so the action
+    /// targets what the user actually sees even if a scroll is still decelerating.
+    private func commitVisiblePhotoIfBrowsing() {
+        if !vm.isBulkMode { carousel.commitVisiblePage() }
+    }
+
     private func handleAlbumTap(group: AlbumGroup, albumID: String) {
+        commitVisiblePhotoIfBrowsing()
         Task { @MainActor in
             if vm.isBulkMode {
                 await vm.bulkAlbumTap(albumID)

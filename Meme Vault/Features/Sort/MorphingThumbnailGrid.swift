@@ -131,7 +131,7 @@ final class MorphController: NSObject, UICollectionViewDelegate, UICollectionVie
     }
 
     /// Repaint the previous + new current cells; in browse, scroll to the new one.
-    func updateCurrent(_ new: String?) {
+    func updateCurrent(_ new: String?, animated: Bool = true) {
         let prev = currentID
         guard prev != new else { return }
         currentID = new
@@ -140,7 +140,7 @@ final class MorphController: NSObject, UICollectionViewDelegate, UICollectionVie
         if let new { dirty.insert(new) }
         reconfigure(dirty)
         if !isBulkMode {
-            scrollToCurrent(animated: true)
+            scrollToCurrent(animated: animated)
         }
     }
 

@@ -181,6 +181,28 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
         onShowAsset(id)
     }
 
+    /// Settle on the currently-centered (most-visible) page and commit it to the
+    /// VM now. Call before an action that operates on "the current photo" while a
+    /// scroll may still be decelerating, so it acts on what the user actually sees
+    /// rather than the last fully-settled page.
+    func commitVisiblePage() {
+        guard !assetIDs.isEmpty, pageStride > 0 else { return }
+        let idx = centeredIndex()
+        // Halt any in-flight deceleration, snapping to that page.
+        if collectionView.isDecelerating || collectionView.isDragging || collectionView.isTracking {
+            isProgrammaticScroll = true
+            collectionView.setContentOffset(CGPoint(x: CGFloat(idx) * pageStride, y: 0), animated: false)
+            isProgrammaticScroll = false
+        }
+        let id = assetIDs[idx]
+        liveID = id
+        guard id != currentID else { return }
+        currentID = id
+        updatePrefetchWindow()
+        refreshAllVisibleState()
+        onShowAsset(id)
+    }
+
     // MARK: - Active cell state
 
     private func activeCell() -> PhotoPageCell? {

@@ -21,6 +21,11 @@ final class SortSessionViewModel {
     private(set) var queue: [String] = []           // remaining asset localIDs
     private(set) var index: Int = 0                 // pointer into queue
     private(set) var totalAssetsInPool: Int = 0
+
+    /// Position of every asset in the full source pool (its original order). The
+    /// queue is always a subset of the pool in this order, so an undone item can
+    /// be re-inserted where it originally was rather than at the scroll position.
+    private var poolRank: [String: Int] = [:]
     private(set) var isLoading: Bool = false
 
     /// Current asset (resolved from localID).
@@ -163,6 +168,7 @@ final class SortSessionViewModel {
         var remaining: [String] = []
         remaining.reserveCapacity(pool.count)
         let allLocalIDs = pool.assetLocalIDs
+        poolRank = Dictionary(allLocalIDs.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
 
         let activeID = currentAssetID
         for id in allLocalIDs {
@@ -829,10 +835,11 @@ final class SortSessionViewModel {
             applyLocalMembershipChange(albumID: albumID, delta: photoIDs.count)
         }
 
-        for id in removedFromQueue.reversed() where !queue.contains(id) {
-            withAnimation(.easeInOut(duration: 0.3)) {
-                queue.insert(id, at: min(index, queue.count))
-            }
+        withAnimation(.easeInOut(duration: 0.3)) {
+            for id in removedFromQueue { insertInPoolOrder(id) }
+        }
+        if let first = removedFromQueue.compactMap({ queue.firstIndex(of: $0) }).min() {
+            index = first
         }
 
         refreshCurrent()
@@ -846,10 +853,11 @@ final class SortSessionViewModel {
         }
         try? modelContext.save()
 
-        for id in ids.reversed() where !queue.contains(id) {
-            withAnimation(.easeInOut(duration: 0.3)) {
-                queue.insert(id, at: min(index, queue.count))
-            }
+        withAnimation(.easeInOut(duration: 0.3)) {
+            for id in ids { insertInPoolOrder(id) }
+        }
+        if let first = ids.compactMap({ queue.firstIndex(of: $0) }).min() {
+            index = first
         }
         refreshCurrent()
     }
@@ -862,10 +870,11 @@ final class SortSessionViewModel {
         }
         try? modelContext.save()
 
-        for id in ids.reversed() where !queue.contains(id) {
-            withAnimation(.easeInOut(duration: 0.3)) {
-                queue.insert(id, at: min(index, queue.count))
-            }
+        withAnimation(.easeInOut(duration: 0.3)) {
+            for id in ids { insertInPoolOrder(id) }
+        }
+        if let first = ids.compactMap({ queue.firstIndex(of: $0) }).min() {
+            index = first
         }
         refreshCurrent()
     }
@@ -934,13 +943,21 @@ final class SortSessionViewModel {
         restoreToQueue(id)
     }
 
-    /// Bring an undone asset back as the current photo, guarding against a
-    /// duplicate insert if it somehow never left the queue.
+    /// Insert `id` into the queue at the position that keeps the queue in the
+    /// source pool's original order — so an undone item returns to where it was,
+    /// not wherever the carousel happens to be scrolled. No-op if already present.
+    private func insertInPoolOrder(_ id: String) {
+        guard !queue.contains(id) else { return }
+        let rank = poolRank[id] ?? Int.max
+        let insertAt = queue.firstIndex { (poolRank[$0] ?? Int.max) > rank } ?? queue.count
+        queue.insert(id, at: insertAt)
+    }
+
+    /// Bring an undone asset back as the current photo, restoring it to its
+    /// original position in the queue.
     private func restoreToQueue(_ id: String) {
         if heroDepartedID == id { heroDepartedID = nil }
-        if !queue.contains(id) {
-            queue.insert(id, at: min(index, queue.count))
-        }
+        insertInPoolOrder(id)
         if let i = queue.firstIndex(of: id) { index = i }
         refreshCurrent()
     }
@@ -1116,6 +1133,7 @@ final class SortSessionViewModel {
         var remaining: [String] = []
         remaining.reserveCapacity(pool.count)
         let allLocalIDs = pool.assetLocalIDs
+        poolRank = Dictionary(allLocalIDs.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
 
         let activeID = currentAssetID
         for id in allLocalIDs {
