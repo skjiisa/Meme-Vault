@@ -71,6 +71,10 @@ final class MorphController: NSObject, UICollectionViewDelegate, UICollectionVie
     private static let revealFadeDuration: TimeInterval = 0.25
     private static let accent = UIColor(named: "AccentColor") ?? .systemBlue
 
+    /// Movement-based animations (layout morph, hero zoom) are suppressed when the
+    /// user has Reduce Motion on; cross-fades are still allowed.
+    private var animationsEnabled: Bool { !UIAccessibility.isReduceMotionEnabled }
+
     override init() {
         let layout = MorphLayout()
         layout.mode = .strip
@@ -215,7 +219,7 @@ final class MorphController: NSObject, UICollectionViewDelegate, UICollectionVie
         applyBulkInsets(topConstraint: topConstraint, topSafeInset: topSafeInset, regionTopInset: regionTopInset)
         let layout = MorphLayout()
         layout.mode = .grid
-        collectionView.setCollectionViewLayout(layout, animated: true)
+        collectionView.setCollectionViewLayout(layout, animated: animationsEnabled)
         scrollGridToCurrent()
         reconfigure(assetIDs)
         runHeroFlight(entering: true, mediaRegionBounds: mediaRegionBounds, onFlightComplete: onFlightComplete)
@@ -238,7 +242,7 @@ final class MorphController: NSObject, UICollectionViewDelegate, UICollectionVie
         applyBulkInsets(topConstraint: topConstraint, topSafeInset: topSafeInset, regionTopInset: regionTopInset)
         let layout = MorphLayout()
         layout.mode = .strip
-        collectionView.setCollectionViewLayout(layout, animated: true)
+        collectionView.setCollectionViewLayout(layout, animated: animationsEnabled)
         reconfigure(assetIDs)
         scrollToCurrent(animated: false)
         let stripFrame = currentCellOnScreenFrame()
@@ -258,6 +262,13 @@ final class MorphController: NSObject, UICollectionViewDelegate, UICollectionVie
         onFlightComplete: @escaping (Bool) -> Void
     ) {
         finishFlight()
+
+        // Reduce Motion: skip the moving zoom flight; the layout swap repositions
+        // cells instantly and the carousel is handed back immediately.
+        guard animationsEnabled else {
+            DispatchQueue.main.async { onFlightComplete(entering) }
+            return
+        }
 
         let flightImage = heroImage ?? ImageLoader.shared.cachedThumbnail(localID: currentID ?? "", targetSize: targetSize)
 
@@ -573,6 +584,16 @@ final class ThumbCell: UICollectionViewCell {
         }
 
         contentView.alpha = isHiddenForFlight ? 0 : baseAlpha
+
+        isAccessibilityElement = true
+        accessibilityLabel = "Photo"
+        if isBulk {
+            accessibilityTraits = isSelected ? [.button, .selected] : .button
+            accessibilityHint = isSelected ? "Double tap to deselect" : "Double tap to select"
+        } else {
+            accessibilityTraits = isCurrent ? [.image, .selected] : .image
+            accessibilityHint = isCurrent ? nil : "Double tap to view"
+        }
 
         if boundID != localID {
             boundID = localID

@@ -181,6 +181,7 @@ final class SortSessionViewController: UIViewController {
 
         progressLabel.font = .preferredFont(forTextStyle: .caption1)
         progressLabel.textColor = .secondaryLabel
+        progressLabel.adjustsFontForContentSizeCategory = true
         progressLabel.translatesAutoresizingMaskIntoConstraints = false
         headerContainer.addSubview(progressLabel)
 
@@ -191,6 +192,7 @@ final class SortSessionViewController: UIViewController {
         badgeLabel.text = "Sorted"
         badgeLabel.font = .preferredFont(forTextStyle: .caption1).withWeight(.semibold)
         badgeLabel.textColor = .systemGreen
+        badgeLabel.adjustsFontForContentSizeCategory = true
         sortedBadge.axis = .horizontal
         sortedBadge.spacing = 3
         sortedBadge.alignment = .center
@@ -340,35 +342,36 @@ final class SortSessionViewController: UIViewController {
     // MARK: - Control bar
 
     private func configureControlBar() {
-        func button(_ btn: UIButton, _ symbol: String, _ action: @escaping () -> Void) {
+        func button(_ btn: UIButton, _ symbol: String, _ label: String, _ action: @escaping () -> Void) {
             btn.setImage(UIImage(systemName: symbol), for: .normal)
+            btn.accessibilityLabel = label
             btn.addAction(UIAction { _ in action() }, for: .touchUpInside)
             btn.translatesAutoresizingMaskIntoConstraints = false
             btn.widthAnchor.constraint(equalToConstant: 44).isActive = true
             btn.heightAnchor.constraint(equalToConstant: 36).isActive = true
             controlBar.addArrangedSubview(btn)
         }
-        button(undoButton, "arrow.uturn.backward") { [weak self] in self?.handleUndo() }
-        button(deleteButton, "trash") { [weak self] in
+        button(undoButton, "arrow.uturn.backward", "Undo") { [weak self] in self?.handleUndo() }
+        button(deleteButton, "trash", "Move to Trash") { [weak self] in
             guard let self else { return }
             self.commitVisiblePhotoIfBrowsing()
             Task { self.vm.isBulkMode ? await self.vm.bulkQueueDelete() : await self.vm.queueDelete() }
         }
         deleteButton.tintColor = .systemRed
-        button(skipButton, "arrow.right.to.line") { [weak self] in
+        button(skipButton, "arrow.right.to.line", "Skip") { [weak self] in
             guard let self else { return }
             self.commitVisiblePhotoIfBrowsing()
             Task { self.vm.isBulkMode ? await self.vm.bulkSkip() : await self.vm.skip() }
         }
-        button(favoriteButton, "heart") { [weak self] in
+        button(favoriteButton, "heart", "Favorite") { [weak self] in
             guard let self else { return }
             self.commitVisiblePhotoIfBrowsing()
             Task { self.vm.isBulkMode ? await self.vm.bulkToggleFavorite() : await self.vm.toggleFavorite() }
         }
         favoriteButton.tintColor = .secondaryLabel
-        button(zoomOutButton, "minus.magnifyingglass") { [weak self] in self?.changeColumns(by: +1) }
-        button(zoomInButton, "plus.magnifyingglass") { [weak self] in self?.changeColumns(by: -1) }
-        button(multiSelectButton, "rectangle.stack") { [weak self] in
+        button(zoomOutButton, "minus.magnifyingglass", "Zoom out, more albums per row") { [weak self] in self?.changeColumns(by: +1) }
+        button(zoomInButton, "plus.magnifyingglass", "Zoom in, fewer albums per row") { [weak self] in self?.changeColumns(by: -1) }
+        button(multiSelectButton, "rectangle.stack", "Multi-select albums") { [weak self] in
             guard let self else { return }
             Task {
                 self.vm.isMultiSelectActive ? await self.vm.deactivateMultiSelect() : await self.vm.activateMultiSelect()
@@ -552,11 +555,13 @@ final class SortSessionViewController: UIViewController {
             lastFavorite = favorite
             favoriteButton.setImage(UIImage(systemName: favorite ? "heart.fill" : "heart"), for: .normal)
             favoriteButton.tintColor = favorite ? .systemYellow : .secondaryLabel
+            favoriteButton.accessibilityValue = favorite ? "Favorited" : "Not favorited"
         }
         if multiSelect != lastMultiSelect {
             lastMultiSelect = multiSelect
             multiSelectButton.setImage(UIImage(systemName: multiSelect ? "rectangle.stack.fill" : "rectangle.stack"), for: .normal)
             multiSelectButton.tintColor = multiSelect ? (UIColor(named: "AccentColor") ?? .systemBlue) : .label
+            multiSelectButton.accessibilityValue = multiSelect ? "On" : "Off"
         }
         zoomOutButton.isEnabled = columnCount < 5
         zoomInButton.isEnabled = columnCount > 2
@@ -623,6 +628,7 @@ final class SortSessionViewController: UIViewController {
             let l = UILabel()
             l.text = title
             l.font = .preferredFont(forTextStyle: .title3).withWeight(.semibold)
+            l.adjustsFontForContentSizeCategory = true
             l.textAlignment = .center
             l.numberOfLines = 0
             messageView.addArrangedSubview(l)
@@ -631,6 +637,7 @@ final class SortSessionViewController: UIViewController {
             let l = UILabel()
             l.text = body
             l.font = .preferredFont(forTextStyle: .subheadline)
+            l.adjustsFontForContentSizeCategory = true
             l.textColor = .secondaryLabel
             l.textAlignment = .center
             l.numberOfLines = 0
@@ -782,6 +789,10 @@ final class SortSessionViewController: UIViewController {
 
     @discardableResult
     private func flyHeroToAlbum(albumID: String, heroID: String?) -> Bool {
+        // Reduce Motion: skip the decorative hero → album flight; the sort itself
+        // still happens via the VM. Returning false tells the caller not to mark a
+        // hero departure (which would blank the page awaiting a flight that never runs).
+        guard !UIAccessibility.isReduceMotionEnabled else { return false }
         guard let heroID, view.window != nil,
               let pageRect = carouselPageRect(in: albumFlightOverlay),
               let slot = album.firstSlotFrame(forAlbum: albumID, in: albumFlightOverlay)
@@ -840,7 +851,8 @@ final class SortSessionViewController: UIViewController {
     /// sort flight. Falls back to a plain undo otherwise.
     private func handleUndo() {
         var pending: (photoID: String, from: CGRect, image: UIImage?, fit: Bool)?
-        if case .sorted(let photoID, let albumID)? = vm.undoStack.last,
+        if !UIAccessibility.isReduceMotionEnabled,
+           case .sorted(let photoID, let albumID)? = vm.undoStack.last,
            let slot = album.firstSlotFrame(forAlbum: albumID, in: albumFlightOverlay),
            albumFlightOverlay.bounds.intersects(slot) {
             // Reuse the image we kept when this photo was sorted, so the flight can
@@ -949,7 +961,9 @@ final class SortSessionViewController: UIViewController {
 
         // Leading: context list, more (trash/skipped), debug.
         var leading: [UIBarButtonItem] = []
-        leading.append(UIBarButtonItem(image: UIImage(systemName: "list.bullet"), primaryAction: UIAction { [weak self] _ in self?.onShowContextList() }))
+        let contextsItem = UIBarButtonItem(image: UIImage(systemName: "list.bullet"), primaryAction: UIAction { [weak self] _ in self?.onShowContextList() })
+        contextsItem.accessibilityLabel = "Contexts"
+        leading.append(contextsItem)
 
         let trashAction = UIAction(title: trashCount > 0 ? "Trash (\(trashCount))" : "Trash",
                                    image: UIImage(systemName: "trash")) { [weak self] _ in self?.onShowTrash() }
@@ -958,13 +972,16 @@ final class SortSessionViewController: UIViewController {
                                      image: UIImage(systemName: "checkmark.circle")) { [weak self] _ in self?.onShowSkipped() }
         skippedAction.attributes = skippedCount == 0 ? [.disabled] : []
         let moreMenu = UIMenu(children: [trashAction, skippedAction])
-        leading.append(UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: moreMenu))
+        let moreItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: moreMenu)
+        moreItem.accessibilityLabel = "Trash and skipped photos"
+        leading.append(moreItem)
 
         if let onDebugClear {
             let debug = UIAction(title: "Remove All Photos from Albums", image: UIImage(systemName: "xmark.bin"), attributes: .destructive) { _ in onDebugClear() }
             let debugMenu = UIMenu(children: [debug])
             let item = UIBarButtonItem(image: UIImage(systemName: "ladybug"), menu: debugMenu)
             item.tintColor = .systemOrange
+            item.accessibilityLabel = "Debug tools"
             leading.append(item)
         }
         navigationItem.leftBarButtonItems = leading
@@ -974,8 +991,11 @@ final class SortSessionViewController: UIViewController {
             image: UIImage(systemName: vm.isBulkMode ? "square.grid.2x2.fill" : "square.grid.2x2"),
             primaryAction: UIAction { [weak self] _ in self?.toggleBulk() })
         bulkItem.tintColor = vm.isBulkMode ? (UIColor(named: "AccentColor") ?? .systemBlue) : .label
+        bulkItem.accessibilityLabel = "Bulk select"
+        bulkItem.accessibilityValue = vm.isBulkMode ? "On" : "Off"
         let editItem = UIBarButtonItem(image: UIImage(systemName: "slider.horizontal.3"),
                                        primaryAction: UIAction { [weak self] _ in self?.onEditContext() })
+        editItem.accessibilityLabel = "Edit context"
         navigationItem.rightBarButtonItems = [editItem, bulkItem]
     }
 

@@ -9,6 +9,7 @@
 
 import SwiftUI
 import Photos
+import os
 
 struct AlbumPicker: View {
     enum Mode {
@@ -28,6 +29,7 @@ struct AlbumPicker: View {
     @State private var showingCreate = false
     @State private var newAlbumName = ""
     @State private var creating = false
+    @State private var createError: String?
 
     var body: some View {
         NavigationStack {
@@ -72,6 +74,14 @@ struct AlbumPicker: View {
                 }
             } message: {
                 Text("This will create a new album in your Photos library.")
+            }
+            .alert("Couldn't Create Album", isPresented: Binding(
+                get: { createError != nil },
+                set: { if !$0 { createError = nil } }
+            )) {
+                Button("OK", role: .cancel) { createError = nil }
+            } message: {
+                Text(createError ?? "")
             }
             .task(id: library.changeTick) { reload() }
             .onAppear { reload() }
@@ -160,8 +170,8 @@ struct AlbumPicker: View {
                 binding.wrappedValue.insert(id)
             }
         } catch {
-            // Silent fail for v1; could surface via alert.
-            print("Create album failed: \(error)")
+            Logger.app.error("Create album failed: \(error.localizedDescription, privacy: .public)")
+            createError = error.localizedDescription
         }
     }
 }

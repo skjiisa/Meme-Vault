@@ -8,6 +8,7 @@
 //
 
 import Foundation
+import os
 import Photos
 import SwiftData
 import SwiftUI
@@ -402,7 +403,7 @@ final class SortSessionViewModel {
         } catch {
             if heroDepartedID == asset.localIdentifier { heroDepartedID = nil }
             Haptics.warning()
-            print("toggleAlbum failed: \(error)")
+            Logger.app.error("toggleAlbum failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 

@@ -61,6 +61,7 @@ struct ContextListView: View {
                     } label: {
                         Image(systemName: "plus")
                     }
+                    .accessibilityLabel("New Context")
                 }
             }
             .sheet(isPresented: $showingNewContext) {

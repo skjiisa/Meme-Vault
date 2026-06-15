@@ -173,6 +173,7 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
         let newRestoredIdx = ids.firstIndex(of: restoredID)
         let newShownIdx = shownID.flatMap { ids.firstIndex(of: $0) }
         let adjacent = animated && pageStride > 0
+            && !UIAccessibility.isReduceMotionEnabled
             && oldShownIdx != nil && newRestoredIdx != nil
             && newShownIdx == (newRestoredIdx ?? -2) + 1
 
@@ -470,6 +471,9 @@ final class PhotoPageCell: UICollectionViewCell {
         missingView.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(missingView)
 
+        isAccessibilityElement = true
+        accessibilityTraits = .image
+
         NSLayoutConstraint.activate([
             card.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             card.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
@@ -588,6 +592,7 @@ final class PhotoPageCell: UICollectionViewCell {
         phase = .loading
         missingView.isHidden = true
         spinner.startAnimating()
+        accessibilityLabel = "Loading photo"
 
         let id = assetID ?? ""
         let size = targetSize
@@ -598,6 +603,7 @@ final class PhotoPageCell: UICollectionViewCell {
                 self.phase = .missing
                 self.spinner.stopAnimating()
                 self.missingView.isHidden = false
+                self.accessibilityLabel = "Photo unavailable"
                 return
             }
             self.kind = Self.mediaKind(for: asset)
@@ -607,6 +613,9 @@ final class PhotoPageCell: UICollectionViewCell {
             self.image = loaded
             self.phase = loaded == nil ? .missing : .loaded
             self.missingView.isHidden = loaded != nil
+            self.accessibilityLabel = loaded == nil
+                ? "Photo unavailable"
+                : (self.kind == .video ? "Video" : "Photo")
             if let loaded {
                 self.foregroundImageView.image = loaded
                 // Real Gaussian blur, computed off-main (Core Image) so the decode

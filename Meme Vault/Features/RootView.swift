@@ -215,8 +215,9 @@ private struct ToolbarBadges: ToolbarContent {
             Button { onShowContextList() } label: {
                 Image(systemName: "list.bullet")
             }
+            .accessibilityLabel("Contexts")
         }
-        
+
         ToolbarItem(placement: .topBarLeading) {
             Menu {
                 Button {

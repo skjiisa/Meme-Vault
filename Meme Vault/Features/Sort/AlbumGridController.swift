@@ -291,8 +291,12 @@ final class AlbumCell: UICollectionViewCell {
 
         countLabel.font = .preferredFont(forTextStyle: .caption2)
         countLabel.textColor = .secondaryLabel
+        countLabel.adjustsFontForContentSizeCategory = true
         countLabel.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(countLabel)
+
+        isAccessibilityElement = true
+        accessibilityTraits = .button
 
         NSLayoutConstraint.activate([
             previewContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
@@ -358,6 +362,11 @@ final class AlbumCell: UICollectionViewCell {
         checkmark.isHidden = !isMember
         contentView.alpha = dimmed ? 0.6 : 1
 
+        accessibilityLabel = title
+        accessibilityValue = (count == 1 ? "1 photo" : "\(count) photos")
+            + (isMember ? ", contains the current photo" : "")
+        accessibilityTraits = isMember ? [.button, .selected] : .button
+
         if needsReload {
             // A brand-new album loads without animation; a membership / recent-add
             // change on the same album animates the reorder.
@@ -379,7 +388,7 @@ final class AlbumCell: UICollectionViewCell {
         thumbnails = new
         let shown = Array(new.prefix(4))
         let newIDs = Set(shown.map(\.id))
-        let doAnimate = animated && previewContainer.bounds.width > 0
+        let doAnimate = animated && previewContainer.bounds.width > 0 && !UIAccessibility.isReduceMotionEnabled
 
         for (id, iv) in thumbViews where !newIDs.contains(id) {
             thumbViews[id] = nil
