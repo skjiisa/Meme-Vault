@@ -47,6 +47,16 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
     var departedID: String? {
         didSet { guard departedID != oldValue else { return }; refreshAllVisibleState() }
     }
+    /// Page whose photo is flying *in* (undo flight): hide only its foreground (the
+    /// flight draws it) while keeping the blurred backdrop, so the blur fades in
+    /// during the flight instead of after it lands.
+    var suppressForegroundID: String? {
+        didSet { guard suppressForegroundID != oldValue else { return }; refreshAllVisibleState() }
+    }
+    /// Image to seed a restored page's blurred backdrop with (the hero image kept
+    /// when the photo was sorted), so the undo flight shows its blur immediately
+    /// instead of a black gap while the full display image decodes.
+    var restoreBackdropImage: (id: String, image: UIImage?)?
 
     /// Carousel → VM: the centered page *settled* on a new asset (commit).
     var onShowAsset: (String) -> Void = { _ in }
@@ -65,6 +75,10 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
     /// Guards the VM↔carousel feedback loop: true while we scroll programmatically
     /// so the resulting scroll callbacks don't echo back into `onShowAsset`.
     private var isProgrammaticScroll = false
+
+    /// True while the undo-restore slide animation is in flight, so a layout pass
+    /// (`updateLayoutMetrics`) doesn't snap the carousel to the target and cancel it.
+    private var isRestoring = false
 
     override init() {
         layout.scrollDirection = .horizontal
@@ -89,9 +103,12 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
                 targetSize: self.pixelTargetSize,
                 isActive: id == self.currentID,
                 isForeground: self.isForeground,
-                suppressForeground: self.suppressForeground,
+                suppressForeground: self.suppressForeground || id == self.suppressForegroundID,
                 isDeparted: id == self.departedID
             )
+            if let seed = self.restoreBackdropImage, seed.id == id, let image = seed.image {
+                cell.seedBackdrop(image)
+            }
         }
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { cv, indexPath, id in
             cv.dequeueConfiguredReusableCell(using: registration, for: indexPath, item: id)
@@ -126,8 +143,9 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
             layout.invalidateLayout()
         }
         layout.sectionInset = UIEdgeInsets(top: 0, left: Self.margin, bottom: 0, right: Self.margin)
-        // Keep the current page centered after a bounds/inset change.
-        scrollToCurrent(animated: false)
+        // Keep the current page centered after a bounds/inset change — but not while
+        // an undo-restore slide is animating, or it would snap straight to the target.
+        if !isRestoring { scrollToCurrent(animated: false) }
     }
 
     // MARK: - Snapshot / binding
@@ -139,6 +157,69 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
         snapshot.appendItems(ids)
         dataSource.apply(snapshot, animatingDifferences: animated)
         updatePrefetchWindow()
+    }
+
+    /// Restore an undone item into the carousel. When it lands immediately before
+    /// the page we're showing (the common "undo right after sorting" case), hold
+    /// the viewport exactly on that page and let the *animated insert* do the work:
+    /// the restored item fades in at center while the page we were on — and only
+    /// the pages to its right — slide one slot right. The viewport never scrolls,
+    /// so pages to the left stay put. This is the mirror of the sort's animated
+    /// delete (which collapses the slot and slides the next page left into place).
+    /// Otherwise jump straight to it, avoiding a long whip-scroll from far away.
+    func applyRestore(_ ids: [String], restoredID: String, animated: Bool) {
+        let shownID = currentID
+        let oldShownIdx = shownID.flatMap { assetIDs.firstIndex(of: $0) }   // pre-insert
+        let newRestoredIdx = ids.firstIndex(of: restoredID)
+        let newShownIdx = shownID.flatMap { ids.firstIndex(of: $0) }
+        let adjacent = animated && pageStride > 0
+            && oldShownIdx != nil && newRestoredIdx != nil
+            && newShownIdx == (newRestoredIdx ?? -2) + 1
+
+        if adjacent {
+            // Insert structurally without animation, force the viewport onto the
+            // restored page's slot (overriding UIKit's compensate-scroll), then slide
+            // only the pages *right* of the insert one slot over: each starts shifted
+            // a stride left (its pre-insert on-screen spot) and animates home. The
+            // restored page sits still at center (its foreground flies in, its blur
+            // fades in), the page to the left never moves, and the viewport doesn't
+            // scroll — the mirror of the sort's collapse-and-slide-left.
+            let restoredIdx = newRestoredIdx!
+            let restoredX = CGFloat(restoredIdx) * pageStride
+            isProgrammaticScroll = true
+            applySnapshot(ids, animated: false)
+            currentID = restoredID
+            collectionView.setContentOffset(CGPoint(x: restoredX, y: 0), animated: false)
+            collectionView.layoutIfNeeded()
+            isProgrammaticScroll = false
+            refreshAllVisibleState()
+
+            var shifted: [UICollectionViewCell] = []
+            for cell in collectionView.visibleCells {
+                guard let ip = collectionView.indexPath(for: cell), ip.item > restoredIdx else { continue }
+                cell.transform = CGAffineTransform(translationX: -pageStride, y: 0)
+                // Keep the sliding page above the restored (center) page while it
+                // covers and then uncovers it — cell z-order isn't index order.
+                cell.layer.zPosition = 2
+                shifted.append(cell)
+            }
+            isRestoring = true
+            UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseInOut]) {
+                for cell in shifted { cell.transform = .identity }
+            } completion: { [weak self] _ in
+                self?.isRestoring = false
+                for cell in shifted { cell.layer.zPosition = 0 }
+            }
+        } else {
+            applySnapshot(ids, animated: false)
+            currentID = restoredID
+            updatePrefetchWindow()
+            collectionView.layoutIfNeeded()
+            refreshAllVisibleState()
+            if pageStride > 0, let restoredIdx = assetIDs.firstIndex(of: restoredID) {
+                collectionView.setContentOffset(CGPoint(x: CGFloat(restoredIdx) * pageStride, y: 0), animated: false)
+            }
+        }
     }
 
     /// VM → carousel: jump to a page. Non-animated for the scroll-anchored bulk
@@ -230,7 +311,7 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
             cell.updateState(
                 isActive: id == currentID,
                 isForeground: isForeground,
-                suppressForeground: suppressForeground,
+                suppressForeground: suppressForeground || id == suppressForegroundID,
                 isDeparted: id == departedID
             )
         }
@@ -444,6 +525,24 @@ final class PhotoPageCell: UICollectionViewCell {
         syncPlayback()
     }
 
+    /// Seed the blurred backdrop from an image supplied by the controller (the
+    /// hero image kept when this photo was sorted), so a restored page shows its
+    /// blur immediately during the undo flight rather than a black gap while the
+    /// full display image decodes. No-op once a backdrop is already present.
+    func seedBackdrop(_ source: UIImage) {
+        guard backdropImageView.image == nil else { return }
+        let id = assetID
+        Task.detached(priority: .userInitiated) {
+            let blurred = Self.blurredBackdrop(from: source)
+            await MainActor.run { [weak self] in
+                guard let self, self.assetID == id, self.backdropImageView.image == nil else { return }
+                self.backdropImageView.alpha = 0
+                self.backdropImageView.image = blurred
+                UIView.animate(withDuration: 0.2) { self.backdropImageView.alpha = 0.8 }
+            }
+        }
+    }
+
     /// Lightweight state update (active/foreground/suppress/departed) without
     /// reloading the still.
     func updateState(isActive: Bool, isForeground: Bool, suppressForeground: Bool, isDeparted: Bool) {
@@ -516,7 +615,19 @@ final class PhotoPageCell: UICollectionViewCell {
                     let blurred = Self.blurredBackdrop(from: loaded)
                     await MainActor.run { [weak self] in
                         guard let self, self.assetID == id else { return }
-                        self.backdropImageView.image = blurred
+                        // When the foreground is suppressed for an in-flight photo
+                        // (undo flight), fade the blur in so it appears during the
+                        // flight rather than popping in after it lands.
+                        if self.suppressForeground, self.backdropImageView.image == nil {
+                            // Not seeded — fade the blur in during the flight.
+                            self.backdropImageView.alpha = 0
+                            self.backdropImageView.image = blurred
+                            UIView.animate(withDuration: 0.25) { self.backdropImageView.alpha = 0.8 }
+                        } else {
+                            // Already visible (seeded or steady state) — upgrade the
+                            // image in place without re-flashing the alpha.
+                            self.backdropImageView.image = blurred
+                        }
                     }
                 }
             }
@@ -608,6 +719,7 @@ final class PhotoPageCell: UICollectionViewCell {
         foregroundImageView.animationImages = nil
         foregroundImageView.stopAnimating()
         backdropImageView.image = nil
+        backdropImageView.alpha = 0.8
         foregroundImageView.alpha = 1
         backdropBlack.alpha = 1
         card.backgroundColor = .secondarySystemBackground

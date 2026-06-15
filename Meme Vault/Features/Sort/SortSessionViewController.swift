@@ -86,11 +86,13 @@ final class SortSessionViewController: UIViewController {
     private var preloadedHeroImage: UIImage?
     private var heroForegroundSuppressed = false
 
+    // Hero image kept at sort time, keyed by photo ID, so an undo can start the
+    // reverse flight immediately (overlapping the carousel slide) instead of
+    // awaiting a fresh decode that would run only after the slide finishes.
+    private var sortedHeroImages: [(id: String, image: UIImage, fit: Bool)] = []
+
     // Album-flight bookkeeping.
     private var albumFlightGeneration = 0
-    /// Restored photo whose carousel page is blanked while it flies back in from
-    /// its album slot on undo (the reverse of the sort flight).
-    private var undoFlightPhotoID: String?
 
     // Observation diff cache.
     private var lastQueue: [String] = []
@@ -142,32 +144,6 @@ final class SortSessionViewController: UIViewController {
         updateNavBar()
         observeVM()
     }
-
-    #if DEBUG
-    private var didRunVerify = false
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
-        guard !didRunVerify, ProcessInfo.processInfo.environment["MV_VERIFY_UNDOFLIGHT"] != nil else { return }
-        didRunVerify = true
-        runUndoFlight(0)
-    }
-
-    private func runUndoFlight(_ n: Int) {
-        let members = Set(vm.memberships.filter(\.isMember).map(\.id))
-        let target = vm.albumInfos.first(where: { !members.contains($0.id) })?.id
-        guard (vm.currentAsset != nil && target != nil) || n > 40 else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.runUndoFlight(n + 1) }
-            return
-        }
-        guard let aid = target else { print("MV_UF: no eligible album"); return }
-        print("MV_UF: sorting current into album (forward flight)")
-        handleAlbumTap(group: .context, albumID: aid)     // forward flight + sort
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
-            print("MV_UF: undo (reverse flight)")
-            self?.handleUndo()
-        }
-    }
-    #endif
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
@@ -494,7 +470,7 @@ final class SortSessionViewController: UIViewController {
         let canUndo = vm.canUndo
         let satisfied = vm.isSatisfied
         let progress = vm.progressText
-        let departed = vm.heroDepartedID ?? undoFlightPhotoID
+        let departed = vm.heroDepartedID
         let isLoading = vm.isLoading
         let hasCurrent = vm.currentAsset != nil
         let showExtraAlert = vm.showExtraOnlyAlert
@@ -504,33 +480,39 @@ final class SortSessionViewController: UIViewController {
         // Top-level state.
         updateState(isLoading: isLoading, queueEmpty: queue.isEmpty, hasCurrent: hasCurrent, isBulk: isBulk)
 
-        // An undo-restore re-inserts an item into the queue and jumps to it. When
-        // we weren't already on that item, animating the insertion AND scrolling to
-        // it looks janky (a whip-scroll over the inserted cell), so for a restore we
-        // position both collections without animation — the item just appears in
-        // place and the carousel is already there.
+        // An undo-restore re-inserts an item into the queue and makes it current.
+        // When it lands right before the page we're on, slide one page over to it
+        // (it slides in, the previous page slides back over) rather than jumping —
+        // the blurred backdrop fades in across that slide. When undoing from far
+        // away, jump straight to it (no long whip-scroll).
         let added = (queue != lastQueue) ? Set(queue).subtracting(lastQueue) : []
         let isRestore = currentID.map { added.contains($0) } ?? false
 
-        // Queue → both collections (skip while a bulk-mode morph is the only change).
-        if queue != lastQueue {
+        if isRestore, let restoredID = currentID {
             lastQueue = queue
-            let anim = didInitialContent && !isRestore
-            carousel.applySnapshot(queue, animated: anim)
-            morph.applySnapshot(queue, animated: anim)
+            lastCurrentID = restoredID
+            carousel.applyRestore(queue, restoredID: restoredID, animated: !isBulk)
+            morph.applySnapshot(queue, animated: true)
+            morph.updateCurrent(restoredID, animated: true)
+        } else {
+            // Queue → both collections.
+            if queue != lastQueue {
+                lastQueue = queue
+                carousel.applySnapshot(queue, animated: didInitialContent)
+                morph.applySnapshot(queue, animated: didInitialContent)
+            }
+            // Current asset → carousel page + strip current cell.
+            if currentID != lastCurrentID {
+                lastCurrentID = currentID
+                carousel.setCurrent(currentID, animated: !isBulk)
+                morph.updateCurrent(currentID)
+            }
         }
 
         // Bulk-mode transitions are run synchronously in toggleBulk(); here we only
         // detect an external flip (shouldn't happen) and keep the cache in sync.
         if isBulk != lastBulkMode {
             lastBulkMode = isBulk
-        }
-
-        // Current asset → carousel page + strip current cell.
-        if currentID != lastCurrentID {
-            lastCurrentID = currentID
-            carousel.setCurrent(currentID, animated: !isBulk && !isRestore)
-            morph.updateCurrent(currentID, animated: !isRestore)
         }
 
         // Bulk selection → strip cells.
@@ -815,6 +797,11 @@ final class SortSessionViewController: UIViewController {
         guard albumFlightOverlay.bounds.intersects(slot) else { return false }
         let from = displayImage != nil ? Self.aspectFitRect(for: image.size, in: pageRect) : pageRect
 
+        // Keep this image so an undo can fly it straight back without re-decoding.
+        sortedHeroImages.removeAll { $0.id == heroID }
+        sortedHeroImages.append((heroID, image, displayImage != nil))
+        if sortedHeroImages.count > 8 { sortedHeroImages.removeFirst() }
+
         albumFlightGeneration += 1
         let generation = albumFlightGeneration
         album.setFlight(albumID: albumID, photoID: heroID)
@@ -852,40 +839,49 @@ final class SortSessionViewController: UIViewController {
     /// next undo is a single sort whose album is on screen — the reverse of the
     /// sort flight. Falls back to a plain undo otherwise.
     private func handleUndo() {
-        var pending: (photoID: String, image: UIImage, from: CGRect)?
-        #if DEBUG
-        if case .sorted(let p, let a)? = vm.undoStack.last {
-            let slot = album.firstSlotFrame(forAlbum: a, in: albumFlightOverlay)
-            let img = ImageLoader.shared.cachedThumbnail(localID: p, targetSize: CGSize(width: 200, height: 200))
-            print("MV_UF2: peek .sorted photo=\(p.suffix(6)) slot=\(slot.map { "\($0)" } ?? "nil") img=\(img != nil)")
-        } else {
-            print("MV_UF2: undoStack.last=\(String(describing: vm.undoStack.last))")
-        }
-        #endif
+        var pending: (photoID: String, from: CGRect, image: UIImage?, fit: Bool)?
         if case .sorted(let photoID, let albumID)? = vm.undoStack.last,
            let slot = album.firstSlotFrame(forAlbum: albumID, in: albumFlightOverlay),
-           albumFlightOverlay.bounds.intersects(slot),
-           let image = ImageLoader.shared.cachedThumbnail(localID: photoID, targetSize: CGSize(width: 200, height: 200)) {
-            pending = (photoID, image, slot)
-            // Blank the restored carousel page up front so it never flashes in
-            // before the flight starts (reconcile reads this via `departed`).
-            undoFlightPhotoID = photoID
+           albumFlightOverlay.bounds.intersects(slot) {
+            // Reuse the image we kept when this photo was sorted, so the flight can
+            // start in lockstep with the carousel slide rather than after a decode.
+            let stashed = sortedHeroImages.last { $0.id == photoID }
+            pending = (photoID, slot, stashed?.image, stashed?.fit ?? false)
+            // Hide the restored page's foreground up front (the flight draws it) so
+            // it never flashes in before the flight — but keep its blurred backdrop,
+            // which fades in during the flight. Per-photo so the pre-undo current
+            // photo isn't affected while the async undo runs.
+            carousel.suppressForegroundID = photoID
+            carousel.restoreBackdropImage = (photoID, stashed?.image)
         }
         Task { @MainActor in
             await vm.undo()
-            if let pending {
-                flyAlbumToHero(photoID: pending.photoID, image: pending.image, from: pending.from)
+            guard let pending else { return }
+            // Fast path: we still have the hero image from the sort — fly it back
+            // immediately so the flight overlaps the slide and the blur fades in.
+            if let image = pending.image {
+                sortedHeroImages.removeAll { $0.id == pending.photoID }
+                flyAlbumToHero(photoID: pending.photoID, image: image, from: pending.from, fitLanding: pending.fit)
+                return
             }
+            // Fallback: decode the full-aspect display image so the flight lands
+            // letterboxed like the hero; else the square album thumbnail (fill).
+            let display = await preloadDisplayImage(for: pending.photoID)
+            let image = display ?? ImageLoader.shared.cachedThumbnail(
+                localID: pending.photoID, targetSize: CGSize(width: 200, height: 200))
+            guard let image else { clearUndoFlight(); return }
+            flyAlbumToHero(photoID: pending.photoID, image: image, from: pending.from, fitLanding: display != nil)
         }
     }
 
     /// Animate a copy of the restored photo from its album preview slot back into
     /// the carousel's hero page. Mirror of `flyHeroToAlbum`.
-    private func flyAlbumToHero(photoID: String, image: UIImage, from: CGRect) {
-        let to = carousel.heroPageRect(in: albumFlightOverlay)
-        #if DEBUG
-        print("MV_UF2: fly from=\(from) to=\(to) window=\(view.window != nil) intersects=\(albumFlightOverlay.bounds.intersects(to))")
-        #endif
+    private func flyAlbumToHero(photoID: String, image: UIImage, from: CGRect, fitLanding: Bool) {
+        let pageRect = carousel.heroPageRect(in: albumFlightOverlay)
+        // With the full image, land at the aspect-fit (letterboxed) rect so it
+        // matches the hero's scaled-to-fit appearance; the square thumbnail
+        // fallback fills the page instead.
+        let to = fitLanding ? Self.aspectFitRect(for: image.size, in: pageRect) : pageRect
         guard view.window != nil, albumFlightOverlay.bounds.intersects(to) else {
             clearUndoFlight()   // can't fly — reveal the carousel page
             return
@@ -893,8 +889,7 @@ final class SortSessionViewController: UIViewController {
 
         albumFlightGeneration += 1
         let generation = albumFlightGeneration
-        carousel.departedID = photoID
-        lastDeparted = photoID
+        carousel.suppressForegroundID = photoID
 
         let fv = UIImageView(image: image)
         fv.contentMode = .scaleAspectFill
@@ -923,10 +918,8 @@ final class SortSessionViewController: UIViewController {
     }
 
     private func clearUndoFlight() {
-        undoFlightPhotoID = nil
-        let d = vm.heroDepartedID
-        carousel.departedID = d
-        lastDeparted = d
+        carousel.suppressForegroundID = nil
+        carousel.restoreBackdropImage = nil
     }
 
     private func carouselPageRect(in target: UIView) -> CGRect? {
