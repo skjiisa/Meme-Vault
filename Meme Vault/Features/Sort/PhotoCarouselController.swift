@@ -103,6 +103,16 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
     var pageWidth: CGFloat { max(1, collectionView.bounds.width - 2 * Self.margin) }
     private var pageStride: CGFloat { pageWidth + spacing }
 
+    /// On-screen rect of the centered hero page (where the photo is shown), in
+    /// `target`'s coordinate space. Independent of the current scroll position —
+    /// the centered page always sits at the same place — so it's the landing rect
+    /// for the undo flight even before the carousel jumps to the restored item.
+    func heroPageRect(in target: UIView) -> CGRect {
+        let rect = CGRect(x: collectionView.contentOffset.x + Self.margin, y: 0,
+                          width: pageWidth, height: collectionView.bounds.height)
+        return collectionView.convert(rect, to: target)
+    }
+
     private var pixelTargetSize: CGSize {
         let scale = collectionView.traitCollection.displayScale > 0 ? collectionView.traitCollection.displayScale : 2
         return CGSize(width: pageWidth * scale, height: collectionView.bounds.height * scale)

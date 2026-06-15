@@ -88,6 +88,9 @@ final class SortSessionViewController: UIViewController {
 
     // Album-flight bookkeeping.
     private var albumFlightGeneration = 0
+    /// Restored photo whose carousel page is blanked while it flies back in from
+    /// its album slot on undo (the reverse of the sort flight).
+    private var undoFlightPhotoID: String?
 
     // Observation diff cache.
     private var lastQueue: [String] = []
@@ -139,6 +142,32 @@ final class SortSessionViewController: UIViewController {
         updateNavBar()
         observeVM()
     }
+
+    #if DEBUG
+    private var didRunVerify = false
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard !didRunVerify, ProcessInfo.processInfo.environment["MV_VERIFY_UNDOFLIGHT"] != nil else { return }
+        didRunVerify = true
+        runUndoFlight(0)
+    }
+
+    private func runUndoFlight(_ n: Int) {
+        let members = Set(vm.memberships.filter(\.isMember).map(\.id))
+        let target = vm.albumInfos.first(where: { !members.contains($0.id) })?.id
+        guard (vm.currentAsset != nil && target != nil) || n > 40 else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.runUndoFlight(n + 1) }
+            return
+        }
+        guard let aid = target else { print("MV_UF: no eligible album"); return }
+        print("MV_UF: sorting current into album (forward flight)")
+        handleAlbumTap(group: .context, albumID: aid)     // forward flight + sort
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
+            print("MV_UF: undo (reverse flight)")
+            self?.handleUndo()
+        }
+    }
+    #endif
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
@@ -343,7 +372,7 @@ final class SortSessionViewController: UIViewController {
             btn.heightAnchor.constraint(equalToConstant: 36).isActive = true
             controlBar.addArrangedSubview(btn)
         }
-        button(undoButton, "arrow.uturn.backward") { [weak self] in Task { await self?.vm.undo() } }
+        button(undoButton, "arrow.uturn.backward") { [weak self] in self?.handleUndo() }
         button(deleteButton, "trash") { [weak self] in
             guard let self else { return }
             self.commitVisiblePhotoIfBrowsing()
@@ -465,7 +494,7 @@ final class SortSessionViewController: UIViewController {
         let canUndo = vm.canUndo
         let satisfied = vm.isSatisfied
         let progress = vm.progressText
-        let departed = vm.heroDepartedID
+        let departed = vm.heroDepartedID ?? undoFlightPhotoID
         let isLoading = vm.isLoading
         let hasCurrent = vm.currentAsset != nil
         let showExtraAlert = vm.showExtraOnlyAlert
@@ -815,6 +844,89 @@ final class SortSessionViewController: UIViewController {
             } completion: { _ in fv.removeFromSuperview() }
         }
         return true
+    }
+
+    // MARK: - Undo (reverse hero flight)
+
+    /// Undo, flying the photo from its album slot back into the carousel when the
+    /// next undo is a single sort whose album is on screen — the reverse of the
+    /// sort flight. Falls back to a plain undo otherwise.
+    private func handleUndo() {
+        var pending: (photoID: String, image: UIImage, from: CGRect)?
+        #if DEBUG
+        if case .sorted(let p, let a)? = vm.undoStack.last {
+            let slot = album.firstSlotFrame(forAlbum: a, in: albumFlightOverlay)
+            let img = ImageLoader.shared.cachedThumbnail(localID: p, targetSize: CGSize(width: 200, height: 200))
+            print("MV_UF2: peek .sorted photo=\(p.suffix(6)) slot=\(slot.map { "\($0)" } ?? "nil") img=\(img != nil)")
+        } else {
+            print("MV_UF2: undoStack.last=\(String(describing: vm.undoStack.last))")
+        }
+        #endif
+        if case .sorted(let photoID, let albumID)? = vm.undoStack.last,
+           let slot = album.firstSlotFrame(forAlbum: albumID, in: albumFlightOverlay),
+           albumFlightOverlay.bounds.intersects(slot),
+           let image = ImageLoader.shared.cachedThumbnail(localID: photoID, targetSize: CGSize(width: 200, height: 200)) {
+            pending = (photoID, image, slot)
+            // Blank the restored carousel page up front so it never flashes in
+            // before the flight starts (reconcile reads this via `departed`).
+            undoFlightPhotoID = photoID
+        }
+        Task { @MainActor in
+            await vm.undo()
+            if let pending {
+                flyAlbumToHero(photoID: pending.photoID, image: pending.image, from: pending.from)
+            }
+        }
+    }
+
+    /// Animate a copy of the restored photo from its album preview slot back into
+    /// the carousel's hero page. Mirror of `flyHeroToAlbum`.
+    private func flyAlbumToHero(photoID: String, image: UIImage, from: CGRect) {
+        let to = carousel.heroPageRect(in: albumFlightOverlay)
+        #if DEBUG
+        print("MV_UF2: fly from=\(from) to=\(to) window=\(view.window != nil) intersects=\(albumFlightOverlay.bounds.intersects(to))")
+        #endif
+        guard view.window != nil, albumFlightOverlay.bounds.intersects(to) else {
+            clearUndoFlight()   // can't fly — reveal the carousel page
+            return
+        }
+
+        albumFlightGeneration += 1
+        let generation = albumFlightGeneration
+        carousel.departedID = photoID
+        lastDeparted = photoID
+
+        let fv = UIImageView(image: image)
+        fv.contentMode = .scaleAspectFill
+        fv.clipsToBounds = true
+        fv.frame = from
+        fv.layer.cornerRadius = 6
+        albumFlightOverlay.addSubview(fv)
+
+        let corner = CABasicAnimation(keyPath: "cornerRadius")
+        corner.fromValue = 6
+        corner.toValue = 0
+        corner.duration = 0.25
+        corner.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        fv.layer.add(corner, forKey: "cornerRadius")
+        fv.layer.cornerRadius = 0
+
+        UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseInOut]) {
+            fv.frame = to
+        } completion: { [weak self] _ in
+            // Reveal the carousel photo, then fade the flight out over it.
+            if let self, self.albumFlightGeneration == generation { self.clearUndoFlight() }
+            UIView.animate(withDuration: 0.12, delay: 0, options: [.curveEaseOut]) {
+                fv.alpha = 0
+            } completion: { _ in fv.removeFromSuperview() }
+        }
+    }
+
+    private func clearUndoFlight() {
+        undoFlightPhotoID = nil
+        let d = vm.heroDepartedID
+        carousel.departedID = d
+        lastDeparted = d
     }
 
     private func carouselPageRect(in target: UIView) -> CGRect? {
