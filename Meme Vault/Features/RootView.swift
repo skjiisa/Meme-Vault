@@ -44,6 +44,17 @@ struct RootView: View {
         return fallbackContext
     }
 
+    /// Debug "clear albums" action surfaced in the UIKit nav bar — only on the
+    /// simulator in DEBUG builds, nil otherwise.
+    private var debugClearAction: (() -> Void)? {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["SIMULATOR_DEVICE_NAME"] != nil {
+            return { showingDebugConfirm = true }
+        }
+        #endif
+        return nil
+    }
+
     /// The context currently on screen: explicit selection, or the primary default.
     private var displayedContext: OrgContext? {
         if let selected = selectedContext,
@@ -59,8 +70,14 @@ struct RootView: View {
                 if !library.isAuthorized {
                     AuthorizationGateView()
                 } else if let ctx = displayedContext {
-                    SortSessionView(context: ctx)
-                        .id("\(ctx.uuid.uuidString)-\(sessionResetTick)")
+                    SortSessionView(
+                        context: ctx,
+                        onShowContextList: { showingContextList = true },
+                        onShowTrash: { photoMode = .trash },
+                        onShowSkipped: { photoMode = .skipped(ctx) },
+                        onDebugClear: debugClearAction
+                    )
+                    .id("\(ctx.uuid.uuidString)-\(sessionResetTick)")
                 } else {
                     // No contexts yet — will be created momentarily by .task
                     ProgressView("Setting up…")
