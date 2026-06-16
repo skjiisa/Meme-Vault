@@ -94,11 +94,18 @@ final class SortSessionViewController: UIViewController {
     // the album grid on the right; the floating glass toolbar spans the bottom in
     // both. `leftColumnGuide`'s trailing edge is the column divider.
     private let leftColumnGuide = UILayoutGuide()
+    private var leftColumnWidthConstraint: NSLayoutConstraint!
     private var compactConstraints: [NSLayoutConstraint] = []
     private var regularConstraints: [NSLayoutConstraint] = []
     private var isRegularLayout = false
-    /// Fraction of the width the photo column gets in the two-pane layout.
-    private let regularLeftFraction: CGFloat = 0.55
+    /// Fraction of the width the photo column gets in the two-pane layout, driven by
+    /// the vertical divider grabber and persisted per context.
+    private var regularLeftFraction: CGFloat = 0.55
+    private let minColumnWidth: CGFloat = 280
+    /// Vertical divider handle shown only in two pane; dragged horizontally to
+    /// rebalance the photo column against the album column.
+    private let columnGrabber = UIView()
+    private var dragStartLeftWidth: CGFloat?
 
     // Resize state
     private var photoHeight: CGFloat = 300
@@ -157,6 +164,7 @@ final class SortSessionViewController: UIViewController {
     private let columnKey: String
     private let photoColumnKey: String
     private let photoHeightKey: String
+    private let splitFractionKey: String
 
     init(vm: SortSessionViewModel) {
         self.vm = vm
@@ -164,6 +172,7 @@ final class SortSessionViewController: UIViewController {
         self.columnKey = "albumGridColumns_\(vm.context.uuid.uuidString)"
         self.photoColumnKey = "photoGridColumns_\(vm.context.uuid.uuidString)"
         self.photoHeightKey = "photoHeight_\(vm.context.uuid.uuidString)"
+        self.splitFractionKey = "sortSplitFraction_\(vm.context.uuid.uuidString)"
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -186,12 +195,16 @@ final class SortSessionViewController: UIViewController {
         if let stored = UserDefaults.standard.object(forKey: photoHeightKey) as? Double {
             photoHeight = CGFloat(stored)
         }
+        if let storedFraction = UserDefaults.standard.object(forKey: splitFractionKey) as? Double {
+            regularLeftFraction = min(0.7, max(0.3, CGFloat(storedFraction)))
+        }
 
         buildHierarchy()
         wireRegions()
         configureControlBar()
         configurePhotoZoomBar()
         configureGrabber()
+        configureColumnGrabber()
         updateNavBar()
         observeVM()
 
@@ -207,8 +220,9 @@ final class SortSessionViewController: UIViewController {
         morph.targetSize = thumbTargetSize
         carousel.updateLayoutMetrics()
         applyInsets()
-        // Keep the photo region within the space the window actually has — a short
-        // or resized window must never starve the album grid / control bar.
+        // Keep the column split + photo region within the space the window actually
+        // has — a short or resized window must never starve the album grid / controls.
+        applyColumnWidth()
         clampMediaHeight()
     }
 
@@ -328,12 +342,27 @@ final class SortSessionViewController: UIViewController {
         messageView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(messageView)
 
+        // Vertical divider handle (two-pane only) — drag horizontally to rebalance
+        // the photo column against the album column. Added above the content so it
+        // takes touches; the flight overlays above it are non-interactive.
+        columnGrabber.translatesAutoresizingMaskIntoConstraints = false
+        columnGrabber.isHidden = true
+        view.addSubview(columnGrabber)
+        let columnBar = UIView()
+        columnBar.backgroundColor = .tertiaryLabel
+        columnBar.layer.cornerRadius = 2.5
+        columnBar.translatesAutoresizingMaskIntoConstraints = false
+        columnGrabber.addSubview(columnBar)
+
         let safe = view.safeAreaLayoutGuide
         view.addLayoutGuide(leftColumnGuide)
         mediaHeightConstraint = mediaRegion.heightAnchor.constraint(equalToConstant: photoHeight)
         morphTopConstraint = morph.collectionView.topAnchor.constraint(equalTo: mediaRegion.topAnchor)
         carouselBottomConstraint = carousel.collectionView.bottomAnchor.constraint(equalTo: mediaRegion.bottomAnchor, constant: -MorphController.stripBandHeight)
         grabberHeightConstraint = resizeGrabber.heightAnchor.constraint(equalToConstant: 20)
+        // Constant-based so the divider grabber can drive it; refined each layout
+        // from `regularLeftFraction` by `applyColumnWidth()`.
+        leftColumnWidthConstraint = leftColumnGuide.widthAnchor.constraint(equalToConstant: 320)
 
         // Constraints shared by both layouts. The per-layout pieces (the trailing
         // edges of the photo column and the album grid's top/leading) live in
@@ -407,7 +436,18 @@ final class SortSessionViewController: UIViewController {
 
             // The left-column divider: its trailing edge splits the two panes.
             leftColumnGuide.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            leftColumnGuide.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: regularLeftFraction),
+            leftColumnWidthConstraint,
+
+            // Divider handle straddles the column boundary, spanning the panes'
+            // height (from the safe-area top down to the floating toolbar).
+            columnGrabber.centerXAnchor.constraint(equalTo: leftColumnGuide.trailingAnchor),
+            columnGrabber.topAnchor.constraint(equalTo: safe.topAnchor),
+            columnGrabber.bottomAnchor.constraint(equalTo: controlBarContainer.topAnchor),
+            columnGrabber.widthAnchor.constraint(equalToConstant: 24),
+            columnBar.centerXAnchor.constraint(equalTo: columnGrabber.centerXAnchor),
+            columnBar.centerYAnchor.constraint(equalTo: columnGrabber.centerYAnchor),
+            columnBar.widthAnchor.constraint(equalToConstant: 5),
+            columnBar.heightAnchor.constraint(equalToConstant: 40),
         ])
 
         // Compact (single column): photo column is full width; the album grid sits
@@ -451,10 +491,12 @@ final class SortSessionViewController: UIViewController {
         }
         grabberHeightConstraint.constant = regular ? 0 : 20
         resizeGrabber.isHidden = regular
+        columnGrabber.isHidden = !regular
         // A size-class flip can land mid hero-flight (entering/exiting bulk); make
         // sure the carousel is never left with its foreground suppressed (blank).
         heroForegroundSuppressed = false
         carousel.suppressForeground = false
+        applyColumnWidth()
         clampMediaHeight()
     }
 
@@ -650,6 +692,54 @@ final class SortSessionViewController: UIViewController {
                            options: [.allowUserInteraction, .beginFromCurrentState]) {
                 self.view.layoutIfNeeded()
             }
+        }
+    }
+
+    // MARK: - Column divider grabber (two pane)
+
+    private func configureColumnGrabber() {
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleColumnGrabberPan(_:)))
+        columnGrabber.addGestureRecognizer(pan)
+    }
+
+    @objc private func handleColumnGrabberPan(_ gesture: UIPanGestureRecognizer) {
+        let translation = gesture.translation(in: view).x
+        switch gesture.state {
+        case .began:
+            dragStartLeftWidth = leftColumnWidthConstraint.constant
+        case .changed:
+            guard let start = dragStartLeftWidth, view.bounds.width > 0 else { return }
+            let target = clampedLeftWidth(start + translation)
+            // Track the fraction live so the next layout pass derives the same width
+            // (and a later window resize keeps the user's chosen balance).
+            regularLeftFraction = target / view.bounds.width
+            leftColumnWidthConstraint.constant = target
+            view.layoutIfNeeded()
+        case .ended, .cancelled, .failed:
+            dragStartLeftWidth = nil
+            UserDefaults.standard.set(Double(regularLeftFraction), forKey: splitFractionKey)
+        default:
+            break
+        }
+    }
+
+    /// Clamp the photo column's width so neither pane drops below `minColumnWidth`.
+    private func clampedLeftWidth(_ width: CGFloat) -> CGFloat {
+        let total = view.bounds.width
+        guard total > 0 else { return width }
+        let minLeft = minColumnWidth
+        let maxLeft = total - minColumnWidth
+        guard maxLeft > minLeft else { return total * 0.5 }
+        return min(maxLeft, max(minLeft, width))
+    }
+
+    /// Pin the column divider to the (clamped) stored fraction of the current width.
+    /// No-op outside the two-pane layout.
+    private func applyColumnWidth() {
+        guard isRegularLayout, view.bounds.width > 0 else { return }
+        let target = clampedLeftWidth(regularLeftFraction * view.bounds.width)
+        if abs(leftColumnWidthConstraint.constant - target) > 0.5 {
+            leftColumnWidthConstraint.constant = target
         }
     }
 
@@ -868,8 +958,10 @@ final class SortSessionViewController: UIViewController {
         mediaRegion.isHidden = hidden
         controlBarContainer.isHidden = hidden
         album.collectionView.isHidden = hidden
-        // The grabber stays collapsed in the two-pane layout regardless of content.
+        // Each grabber belongs to one layout: the horizontal height grabber in single
+        // column, the vertical divider grabber in two pane.
         resizeGrabber.isHidden = hidden || isRegularLayout
+        columnGrabber.isHidden = hidden || !isRegularLayout
     }
 
     /// Full-screen loading takeover (spinner + optional title). The all-sorted
