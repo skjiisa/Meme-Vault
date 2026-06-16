@@ -115,7 +115,10 @@ final class SortSessionViewController: UIViewController {
     private var lastDeparted: String?
     private var lastExtraAlert = false
     private var lastNavTitle = ""
+    private var lastWriteErrorToken = 0
     private var didInitialContent = false
+
+    private var writeErrorBanner: UIView?
 
     private let columnKey: String
     private let photoHeightKey: String
@@ -486,8 +489,17 @@ final class SortSessionViewController: UIViewController {
         let isLoading = vm.isLoading
         let hasCurrent = vm.currentAsset != nil
         let showExtraAlert = vm.showExtraOnlyAlert
+        let writeErrorToken = vm.writeErrorToken
+        let writeErrorMessage = vm.writeErrorMessage
 
         guard isViewLoaded else { return }
+
+        // Surface a swallowed PhotoKit write failure as a transient banner. Token
+        // increments per failure, so repeats with the same text still show.
+        if writeErrorToken != lastWriteErrorToken {
+            lastWriteErrorToken = writeErrorToken
+            if let writeErrorMessage { presentWriteErrorBanner(writeErrorMessage) }
+        }
 
         // Top-level state.
         updateState(isLoading: isLoading, queueEmpty: queue.isEmpty, hasCurrent: hasCurrent, isBulk: isBulk)
@@ -1113,6 +1125,73 @@ final class SortSessionViewController: UIViewController {
             self?.vm.dismissExtraOnlyAlert()
         })
         present(alert, animated: true)
+    }
+
+    /// Transient top banner for a non-blocking write failure (e.g. an album add
+    /// that didn't save). Auto-dismisses; non-modal so it doesn't interrupt sorting.
+    private func presentWriteErrorBanner(_ message: String) {
+        writeErrorBanner?.removeFromSuperview()
+
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemThickMaterial))
+        blur.layer.cornerRadius = 16
+        blur.clipsToBounds = true
+        blur.translatesAutoresizingMaskIntoConstraints = false
+
+        let icon = UIImageView(image: UIImage(systemName: "exclamationmark.triangle.fill"))
+        icon.tintColor = .systemOrange
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        icon.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let label = UILabel()
+        label.text = message
+        label.font = .preferredFont(forTextStyle: .subheadline)
+        label.adjustsFontForContentSizeCategory = true
+        label.numberOfLines = 0
+
+        let stack = UIStackView(arrangedSubviews: [icon, label])
+        stack.spacing = 10
+        stack.alignment = .center
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        blur.contentView.addSubview(stack)
+
+        view.addSubview(blur)
+        writeErrorBanner = blur
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: blur.contentView.leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: blur.contentView.trailingAnchor, constant: -14),
+            stack.topAnchor.constraint(equalTo: blur.contentView.topAnchor, constant: 12),
+            stack.bottomAnchor.constraint(equalTo: blur.contentView.bottomAnchor, constant: -12),
+
+            blur.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 6),
+            blur.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 16),
+            blur.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -16),
+            blur.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+        ])
+
+        // Announce for VoiceOver users, who won't see the transient banner.
+        UIAccessibility.post(notification: .announcement, argument: message)
+
+        let animate = !UIAccessibility.isReduceMotionEnabled
+        blur.alpha = 0
+        blur.transform = CGAffineTransform(translationX: 0, y: -16)
+        UIView.animate(withDuration: animate ? 0.3 : 0) {
+            blur.alpha = 1
+            blur.transform = .identity
+        }
+
+        Haptics.warning()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.2) { [weak self, weak blur] in
+            guard let blur, blur === self?.writeErrorBanner else { return }
+            UIView.animate(withDuration: animate ? 0.25 : 0) {
+                blur.alpha = 0
+                blur.transform = CGAffineTransform(translationX: 0, y: -16)
+            } completion: { _ in
+                blur.removeFromSuperview()
+                if self?.writeErrorBanner === blur { self?.writeErrorBanner = nil }
+            }
+        }
     }
 }
 
