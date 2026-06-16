@@ -14,6 +14,7 @@ import Photos
 struct RootView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(PhotoLibrary.self) private var library
+    @Environment(\.scenePhase) private var scenePhase
 
     @Query(sort: \OrgContext.createdAt, order: .reverse)
     private var contexts: [OrgContext]
@@ -152,6 +153,14 @@ struct RootView: View {
                 lastUsedContextUUID = uuid.uuidString
             }
         }
+        .onChange(of: scenePhase) { _, phase in
+            // Pick up an access change made in Settings (e.g. Limited → Full) when
+            // the user returns, so the gate clears without a relaunch.
+            if phase == .active {
+                library.refreshAuthorizationStatus()
+                ensureDefaultContext()
+            }
+        }
     }
 
     // MARK: - Default context auto-creation
@@ -251,11 +260,35 @@ private struct ToolbarBadges: ToolbarContent {
 private struct AuthorizationGateView: View {
     @Environment(PhotoLibrary.self) private var library
 
+    /// Why access is needed, tailored to the current status. Full access is
+    /// required because sorting into existing albums means the app must be able to
+    /// see every album — limited access exposes only hand-picked photos and no albums.
+    private var explanation: String {
+        switch library.authorization {
+        case .limited:
+            return "Meme Vault sorts your photos into your existing albums, so it needs to see your whole library. “Limited” access hides your albums, so the app can't work. Please choose Full Access in Settings."
+        case .denied, .restricted:
+            return "Meme Vault sorts your photos into your existing albums, so it needs full access to your photo library. Please allow Full Access in Settings."
+        default:
+            return "Meme Vault sorts your photos into your existing albums, so it needs full access to your photo library."
+        }
+    }
+
     var body: some View {
         ContentUnavailableView {
-            Label("Photo Access Needed", systemImage: "photo.badge.exclamationmark")
+            Label("Full Photo Access Needed", systemImage: "photo.badge.exclamationmark")
         } description: {
-            Text("Meme Vault needs access to your photo library to organize your photos.")
+            VStack(spacing: 14) {
+                Text(explanation)
+                Label {
+                    Text("Your photos never leave your device. Meme Vault doesn't collect, upload, or share any of your photos or data.")
+                } icon: {
+                    Image(systemName: "lock.fill")
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            }
+            .multilineTextAlignment(.center)
         } actions: {
             switch library.authorization {
             case .notDetermined:
@@ -263,7 +296,7 @@ private struct AuthorizationGateView: View {
                     Task { await library.requestAuthorization() }
                 }
                 .buttonStyle(.borderedProminent)
-            case .denied, .restricted:
+            case .limited, .denied, .restricted:
                 Button("Open Settings") {
                     if let url = URL(string: UIApplication.openSettingsURLString) {
                         UIApplication.shared.open(url)
