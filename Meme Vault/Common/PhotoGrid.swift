@@ -20,6 +20,7 @@ struct PhotoGrid<Cell: View>: View {
     @ViewBuilder var cell: (String) -> Cell
 
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private let columns = [GridItem(.adaptive(minimum: 100), spacing: 8)]
 
@@ -33,12 +34,13 @@ struct PhotoGrid<Cell: View>: View {
             LazyVGrid(columns: columns, spacing: 8) {
                 ForEach(Array(assetIDs.enumerated()), id: \.element) { index, id in
                     cell(id)
-                        .transition(.scale.combined(with: .opacity))
+                        // Reduce Motion: cross-fade only (no scale).
+                        .transition(reduceMotion ? .opacity : .scale.combined(with: .opacity))
                         .onAppear { prefetchAhead(from: index) }
                 }
             }
             .padding(12)
-            .animation(.interactiveSpring(), value: assetIDs)
+            .animation(reduceMotion ? nil : .interactiveSpring(), value: assetIDs)
         }
     }
 

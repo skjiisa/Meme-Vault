@@ -135,6 +135,38 @@ final class SortSessionViewModel {
         try? modelContext.save()
     }
 
+    /// Drops SwiftData records that reference PhotoKit objects which no longer
+    /// exist: skips / pending-deletes whose asset was deleted outside the app
+    /// (otherwise they'd silently shrink the queue forever), and — for non-default
+    /// contexts — destination / pinned albums that were deleted (which would
+    /// linger as permanent zero-count cells). The default context re-syncs its
+    /// album list from the library separately, so its albums aren't pruned here.
+    private func pruneStaleRecords() {
+        var changed = false
+
+        let recordIDs = Set(context.skips.map(\.assetLocalID) + context.pendingDeletes.map(\.assetLocalID))
+        if !recordIDs.isEmpty {
+            let liveAssetIDs = Set(AlbumService.assets(for: Array(recordIDs)).map(\.localIdentifier))
+            let staleSkips = context.skips.filter { !liveAssetIDs.contains($0.assetLocalID) }
+            let staleDeletes = context.pendingDeletes.filter { !liveAssetIDs.contains($0.assetLocalID) }
+            for skip in staleSkips { modelContext.delete(skip); changed = true }
+            for pd in staleDeletes { modelContext.delete(pd); changed = true }
+        }
+
+        if !context.isDefault {
+            let referenced = context.albumLocalIDs + context.pinnedAlbumLocalIDs
+            if !referenced.isEmpty {
+                let liveAlbumIDs = Set(AlbumService.collections(for: referenced).map(\.localIdentifier))
+                let prunedAlbums = context.albumLocalIDs.filter(liveAlbumIDs.contains)
+                if prunedAlbums != context.albumLocalIDs { context.albumLocalIDs = prunedAlbums; changed = true }
+                let prunedPinned = context.pinnedAlbumLocalIDs.filter(liveAlbumIDs.contains)
+                if prunedPinned != context.pinnedAlbumLocalIDs { context.pinnedAlbumLocalIDs = prunedPinned; changed = true }
+            }
+        }
+
+        if changed { try? modelContext.save() }
+    }
+
     /// Recomputes the queue from PhotoKit + skip/pending-delete state.
     /// Full rebuild: invalidates evaluator cache, re-fetches source pool, and
     /// refreshes album metadata. Used on first load, context edit, and view
@@ -147,6 +179,8 @@ final class SortSessionViewModel {
         if context.isDefault {
             refreshDefaultAlbums()
         }
+
+        pruneStaleRecords()
 
         // Read the SwiftData-backed inputs on the main actor, then run the
         // (potentially huge) pool enumeration off it so it doesn't freeze the UI.
