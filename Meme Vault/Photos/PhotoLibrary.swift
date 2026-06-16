@@ -63,8 +63,19 @@ final class PhotoLibrary: NSObject {
         return status
     }
 
+    /// The app sorts photos into the user's existing albums, which limited access
+    /// can't enumerate — so only *full* access makes the app functional.
     var isAuthorized: Bool {
-        authorization == .authorized || authorization == .limited
+        authorization == .authorized
+    }
+
+    /// Re-read the current status without prompting (e.g. when returning from
+    /// Settings, where the user may have changed access). Registers the change
+    /// observer if access is now usable.
+    func refreshAuthorizationStatus() {
+        let current = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if current != authorization { authorization = current }
+        if current == .authorized || current == .limited { registerObserverIfNeeded() }
     }
 
     private func registerObserverIfNeeded() {

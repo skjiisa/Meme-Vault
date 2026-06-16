@@ -43,6 +43,9 @@ struct ThumbnailCell: View {
                         .background(Circle().fill(.fill))
                 }
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Photo")
+            .accessibilityValue(showRestoreIndicator ? "Marked to restore" : "")
             .task(id: assetLocalID) {
                 if let cached = ImageLoader.shared.cachedThumbnail(localID: assetLocalID, targetSize: targetSize) {
                     thumbnail = cached

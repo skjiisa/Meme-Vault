@@ -8,9 +8,11 @@
 //
 
 import Foundation
+import os
 import Photos
 import SwiftData
 import SwiftUI
+import UIKit
 
 @MainActor
 @Observable
@@ -52,6 +54,33 @@ final class SortSessionViewModel {
 
     /// Shown when the user tries to save with only extra (non-context) albums selected.
     var showExtraOnlyAlert: Bool = false
+
+    /// Last user-facing PhotoKit write failure. `writeErrorToken` increments on each
+    /// report so the UI can detect a fresh failure even when the message repeats.
+    private(set) var writeErrorMessage: String?
+    private(set) var writeErrorToken: Int = 0
+
+    /// Whether movement animations should be suppressed for accessibility.
+    private var reduceMotion: Bool { UIAccessibility.isReduceMotionEnabled }
+
+    /// Animation for queue insert/remove, honoring Reduce Motion (nil = instant).
+    private var queueAnimation: Animation? {
+        reduceMotion ? nil : .easeInOut(duration: 0.3)
+    }
+
+    /// Record a write failure for the UI to surface. `count`/`noun` build a concise
+    /// message; the string overload sets one verbatim.
+    private func reportWriteFailure(count: Int, noun: String) {
+        guard count > 0 else { return }
+        reportWriteFailure("Couldn't update \(count) \(noun)\(count == 1 ? "" : "s"). Check your connection and try again.")
+    }
+
+    private func reportWriteFailure(_ message: String) {
+        writeErrorMessage = message
+        writeErrorToken += 1
+    }
+
+    func clearWriteError() { writeErrorMessage = nil }
 
     /// Cached snapshot of the context's destination albums. Recomputed on
     /// queue rebuild (and on explicit refresh). Per-tap toggles patch this
@@ -134,6 +163,38 @@ final class SortSessionViewModel {
         try? modelContext.save()
     }
 
+    /// Drops SwiftData records that reference PhotoKit objects which no longer
+    /// exist: skips / pending-deletes whose asset was deleted outside the app
+    /// (otherwise they'd silently shrink the queue forever), and — for non-default
+    /// contexts — destination / pinned albums that were deleted (which would
+    /// linger as permanent zero-count cells). The default context re-syncs its
+    /// album list from the library separately, so its albums aren't pruned here.
+    private func pruneStaleRecords() {
+        var changed = false
+
+        let recordIDs = Set(context.skips.map(\.assetLocalID) + context.pendingDeletes.map(\.assetLocalID))
+        if !recordIDs.isEmpty {
+            let liveAssetIDs = Set(AlbumService.assets(for: Array(recordIDs)).map(\.localIdentifier))
+            let staleSkips = context.skips.filter { !liveAssetIDs.contains($0.assetLocalID) }
+            let staleDeletes = context.pendingDeletes.filter { !liveAssetIDs.contains($0.assetLocalID) }
+            for skip in staleSkips { modelContext.delete(skip); changed = true }
+            for pd in staleDeletes { modelContext.delete(pd); changed = true }
+        }
+
+        if !context.isDefault {
+            let referenced = context.albumLocalIDs + context.pinnedAlbumLocalIDs
+            if !referenced.isEmpty {
+                let liveAlbumIDs = Set(AlbumService.collections(for: referenced).map(\.localIdentifier))
+                let prunedAlbums = context.albumLocalIDs.filter(liveAlbumIDs.contains)
+                if prunedAlbums != context.albumLocalIDs { context.albumLocalIDs = prunedAlbums; changed = true }
+                let prunedPinned = context.pinnedAlbumLocalIDs.filter(liveAlbumIDs.contains)
+                if prunedPinned != context.pinnedAlbumLocalIDs { context.pinnedAlbumLocalIDs = prunedPinned; changed = true }
+            }
+        }
+
+        if changed { try? modelContext.save() }
+    }
+
     /// Recomputes the queue from PhotoKit + skip/pending-delete state.
     /// Full rebuild: invalidates evaluator cache, re-fetches source pool, and
     /// refreshes album metadata. Used on first load, context edit, and view
@@ -146,6 +207,8 @@ final class SortSessionViewModel {
         if context.isDefault {
             refreshDefaultAlbums()
         }
+
+        pruneStaleRecords()
 
         // Read the SwiftData-backed inputs on the main actor, then run the
         // (potentially huge) pool enumeration off it so it doesn't freeze the UI.
@@ -402,7 +465,8 @@ final class SortSessionViewModel {
         } catch {
             if heroDepartedID == asset.localIdentifier { heroDepartedID = nil }
             Haptics.warning()
-            print("toggleAlbum failed: \(error)")
+            Logger.app.error("toggleAlbum failed: \(error.localizedDescription, privacy: .public)")
+            reportWriteFailure("Couldn't save that change. Check your connection and try again.")
         }
     }
 
@@ -502,6 +566,7 @@ final class SortSessionViewModel {
         }
 
         // Commit all pending changes to PhotoKit.
+        var failures = 0
         for albumID in adds {
             guard let collection = AlbumService.collection(for: albumID) else { continue }
             do {
@@ -509,7 +574,10 @@ final class SortSessionViewModel {
                 evaluator.noteAdded(asset: asset.localIdentifier, to: albumID)
                 noteSessionAdds([asset.localIdentifier], albumID: albumID)
                 applyLocalMembershipChange(albumID: albumID, delta: +1)
-            } catch {}
+            } catch {
+                failures += 1
+                Logger.app.error("multi-select add failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
         for albumID in removes {
             guard let collection = AlbumService.collection(for: albumID) else { continue }
@@ -518,8 +586,12 @@ final class SortSessionViewModel {
                 evaluator.noteRemoved(asset: asset.localIdentifier, from: albumID)
                 noteSessionRemovals([asset.localIdentifier], albumID: albumID)
                 applyLocalMembershipChange(albumID: albumID, delta: -1)
-            } catch {}
+            } catch {
+                failures += 1
+                Logger.app.error("multi-select remove failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
+        reportWriteFailure(count: failures, noun: "album change")
 
         multiSelectAdds = []
         multiSelectRemoves = []
@@ -564,6 +636,7 @@ final class SortSessionViewModel {
 
         var addedByAlbum: [String: [String]] = [:]
         var removedByAlbum: [String: [String]] = [:]
+        var failures = 0
 
         for albumID in adds {
             guard let collection = AlbumService.collection(for: albumID) else { continue }
@@ -576,7 +649,10 @@ final class SortSessionViewModel {
                     try await AlbumService.add(asset, to: collection, assumeNotMember: true)
                     evaluator.noteAdded(asset: photoID, to: albumID)
                     added.append(photoID)
-                } catch {}
+                } catch {
+                    failures += 1
+                    Logger.app.error("bulk multi-select add failed: \(error.localizedDescription, privacy: .public)")
+                }
             }
             if !added.isEmpty {
                 addedByAlbum[albumID] = added
@@ -596,7 +672,10 @@ final class SortSessionViewModel {
                     try await AlbumService.remove(asset, from: collection, assumeMember: true)
                     evaluator.noteRemoved(asset: photoID, from: albumID)
                     removed.append(photoID)
-                } catch {}
+                } catch {
+                    failures += 1
+                    Logger.app.error("bulk multi-select remove failed: \(error.localizedDescription, privacy: .public)")
+                }
             }
             if !removed.isEmpty {
                 removedByAlbum[albumID] = removed
@@ -604,6 +683,7 @@ final class SortSessionViewModel {
                 applyLocalMembershipChange(albumID: albumID, delta: -removed.count)
             }
         }
+        reportWriteFailure(count: failures, noun: "photo")
 
         var removedFromQueue: [String] = []
         for id in selected {
@@ -614,7 +694,7 @@ final class SortSessionViewModel {
 
         if !removedFromQueue.isEmpty {
             let removedSet = Set(removedFromQueue)
-            withAnimation(.easeInOut(duration: 0.3)) {
+            withAnimation(queueAnimation) {
                 queue.removeAll { removedSet.contains($0) }
             }
             if index >= queue.count { index = max(0, queue.count - 1) }
@@ -702,6 +782,7 @@ final class SortSessionViewModel {
 
         let members = evaluator.members(of: albumID)
         var addedIDs: [String] = []
+        var failures = 0
 
         for id in selected {
             if members.contains(id) { continue }
@@ -710,8 +791,12 @@ final class SortSessionViewModel {
                 try await AlbumService.add(asset, to: collection, assumeNotMember: true)
                 evaluator.noteAdded(asset: id, to: albumID)
                 addedIDs.append(id)
-            } catch {}
+            } catch {
+                failures += 1
+                Logger.app.error("bulk sort failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
+        reportWriteFailure(count: failures, noun: "photo")
 
         if !addedIDs.isEmpty {
             noteSessionAdds(addedIDs, albumID: albumID)
@@ -727,7 +812,7 @@ final class SortSessionViewModel {
 
         if !removedIDs.isEmpty {
             let removedSet = Set(removedIDs)
-            withAnimation(.easeInOut(duration: 0.3)) {
+            withAnimation(queueAnimation) {
                 queue.removeAll { removedSet.contains($0) }
             }
             if index >= queue.count { index = max(0, queue.count - 1) }
@@ -758,7 +843,7 @@ final class SortSessionViewModel {
         try? modelContext.save()
 
         let removedSet = Set(selected)
-        withAnimation(.easeInOut(duration: 0.3)) {
+        withAnimation(queueAnimation) {
             queue.removeAll { removedSet.contains($0) }
         }
         if index >= queue.count { index = max(0, queue.count - 1) }
@@ -781,7 +866,7 @@ final class SortSessionViewModel {
         try? modelContext.save()
 
         let removedSet = Set(selected)
-        withAnimation(.easeInOut(duration: 0.3)) {
+        withAnimation(queueAnimation) {
             queue.removeAll { removedSet.contains($0) }
         }
         if index >= queue.count { index = max(0, queue.count - 1) }
@@ -797,11 +882,16 @@ final class SortSessionViewModel {
         guard !selected.isEmpty else { return }
         let assets = AlbumService.assets(for: selected)
         let shouldFavorite = assets.contains { !$0.isFavorite }
+        var failures = 0
         for asset in assets {
             do {
                 try await AlbumService.performFavorite(asset: asset, favorite: shouldFavorite)
-            } catch {}
+            } catch {
+                failures += 1
+                Logger.app.error("bulk favorite failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
+        reportWriteFailure(count: failures, noun: "favorite")
         Haptics.tap()
         refreshCurrent()
     }
@@ -809,6 +899,7 @@ final class SortSessionViewModel {
     // MARK: - Bulk undo
 
     private func undoBulkSort(addedByAlbum: [String: [String]], removedByAlbum: [String: [String]], removedFromQueue: [String]) async {
+        var failures = 0
         for (albumID, photoIDs) in addedByAlbum {
             guard let collection = AlbumService.collection(for: albumID) else { continue }
             for id in photoIDs {
@@ -816,7 +907,10 @@ final class SortSessionViewModel {
                 do {
                     try await AlbumService.remove(asset, from: collection, assumeMember: true)
                     evaluator.noteRemoved(asset: id, from: albumID)
-                } catch {}
+                } catch {
+                    failures += 1
+                    Logger.app.error("undo bulk remove failed: \(error.localizedDescription, privacy: .public)")
+                }
             }
             noteSessionRemovals(photoIDs, albumID: albumID)
             applyLocalMembershipChange(albumID: albumID, delta: -photoIDs.count)
@@ -829,13 +923,19 @@ final class SortSessionViewModel {
                 do {
                     try await AlbumService.add(asset, to: collection, assumeNotMember: true)
                     evaluator.noteAdded(asset: id, to: albumID)
-                } catch {}
+                } catch {
+                    failures += 1
+                    Logger.app.error("undo bulk add failed: \(error.localizedDescription, privacy: .public)")
+                }
             }
             noteSessionAdds(photoIDs, albumID: albumID)
             applyLocalMembershipChange(albumID: albumID, delta: photoIDs.count)
         }
+        if failures > 0 {
+            reportWriteFailure("Couldn't fully undo — \(failures) change\(failures == 1 ? "" : "s") didn't revert.")
+        }
 
-        withAnimation(.easeInOut(duration: 0.3)) {
+        withAnimation(queueAnimation) {
             for id in removedFromQueue { insertInPoolOrder(id) }
         }
         if let first = removedFromQueue.compactMap({ queue.firstIndex(of: $0) }).min() {
@@ -853,7 +953,7 @@ final class SortSessionViewModel {
         }
         try? modelContext.save()
 
-        withAnimation(.easeInOut(duration: 0.3)) {
+        withAnimation(queueAnimation) {
             for id in ids { insertInPoolOrder(id) }
         }
         if let first = ids.compactMap({ queue.firstIndex(of: $0) }).min() {
@@ -870,7 +970,7 @@ final class SortSessionViewModel {
         }
         try? modelContext.save()
 
-        withAnimation(.easeInOut(duration: 0.3)) {
+        withAnimation(queueAnimation) {
             for id in ids { insertInPoolOrder(id) }
         }
         if let first = ids.compactMap({ queue.firstIndex(of: $0) }).min() {
@@ -907,7 +1007,7 @@ final class SortSessionViewModel {
             return
         }
         let removedID = queue[index]
-        withAnimation(.interactiveSpring(duration: 0.25)) {
+        withAnimation(reduceMotion ? nil : .interactiveSpring(duration: 0.25)) {
             queue.remove(at: index)
             refreshCurrent()
         }
@@ -994,12 +1094,16 @@ final class SortSessionViewModel {
             evaluator.noteRemoved(asset: id, from: albumID)
             noteSessionRemovals([id], albumID: albumID)
             applyLocalMembershipChange(albumID: albumID, delta: -1)
-        } catch {}
+        } catch {
+            Logger.app.error("undo sort failed: \(error.localizedDescription, privacy: .public)")
+            reportWriteFailure("Couldn't fully undo that change.")
+        }
         restoreToQueue(id)
     }
 
     private func undoSortMulti(id: String, adds: [String], removes: [String]) async {
         guard let asset = AlbumService.asset(for: id) else { return }
+        var failures = 0
         for albumID in adds {
             guard let collection = AlbumService.collection(for: albumID) else { continue }
             do {
@@ -1007,7 +1111,10 @@ final class SortSessionViewModel {
                 evaluator.noteRemoved(asset: id, from: albumID)
                 noteSessionRemovals([id], albumID: albumID)
                 applyLocalMembershipChange(albumID: albumID, delta: -1)
-            } catch {}
+            } catch {
+                failures += 1
+                Logger.app.error("undo multi remove failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
         for albumID in removes {
             guard let collection = AlbumService.collection(for: albumID) else { continue }
@@ -1016,7 +1123,13 @@ final class SortSessionViewModel {
                 evaluator.noteAdded(asset: id, to: albumID)
                 noteSessionAdds([id], albumID: albumID)
                 applyLocalMembershipChange(albumID: albumID, delta: +1)
-            } catch {}
+            } catch {
+                failures += 1
+                Logger.app.error("undo multi add failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        if failures > 0 {
+            reportWriteFailure("Couldn't fully undo — \(failures) change\(failures == 1 ? "" : "s") didn't revert.")
         }
         restoreToQueue(id)
     }

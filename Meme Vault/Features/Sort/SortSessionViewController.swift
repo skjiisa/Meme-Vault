@@ -34,6 +34,7 @@ final class SortSessionViewController: UIViewController {
     var onEditContext: () -> Void = {}
     var onViewAlbum: (String, String) -> Void = { _, _ in }
     var onDebugClear: (() -> Void)?
+    var onDebugShowOnboarding: (() -> Void)?
 
     // Regions
     private let carousel = PhotoCarouselController()
@@ -49,7 +50,13 @@ final class SortSessionViewController: UIViewController {
     private let albumFlightOverlay = UIView()  // hero → album-slot, over everything
     private let resizeGrabber = UIView()
     private let controlBar = UIStackView()
-    private let messageView = UIStackView()    // loading / all-sorted
+    private let messageView = UIStackView()    // loading spinner (full-screen)
+
+    // "All sorted" celebration shown *inside* the media region, so the album
+    // picker + control bar stay on screen behind/around it.
+    private let completionView = UIView()
+    private let completionCheckmark = UIImageView()
+    private var lastCompletionShown = false
 
     // Control-bar buttons (kept to update enabled / image state).
     private let undoButton = UIButton(type: .system)
@@ -102,13 +109,16 @@ final class SortSessionViewController: UIViewController {
     private var lastMultiSelect = false
     private var lastFavorite = false
     private var lastCanUndo = false
-    private var lastBulkNoSelection = false
+    private var lastActionsDisabled = false
     private var lastProgress = ""
     private var lastSatisfied = false
     private var lastDeparted: String?
     private var lastExtraAlert = false
     private var lastNavTitle = ""
+    private var lastWriteErrorToken = 0
     private var didInitialContent = false
+
+    private var writeErrorBanner: UIView?
 
     private let columnKey: String
     private let photoHeightKey: String
@@ -181,6 +191,7 @@ final class SortSessionViewController: UIViewController {
 
         progressLabel.font = .preferredFont(forTextStyle: .caption1)
         progressLabel.textColor = .secondaryLabel
+        progressLabel.adjustsFontForContentSizeCategory = true
         progressLabel.translatesAutoresizingMaskIntoConstraints = false
         headerContainer.addSubview(progressLabel)
 
@@ -191,6 +202,7 @@ final class SortSessionViewController: UIViewController {
         badgeLabel.text = "Sorted"
         badgeLabel.font = .preferredFont(forTextStyle: .caption1).withWeight(.semibold)
         badgeLabel.textColor = .systemGreen
+        badgeLabel.adjustsFontForContentSizeCategory = true
         sortedBadge.axis = .horizontal
         sortedBadge.spacing = 3
         sortedBadge.alignment = .center
@@ -214,6 +226,8 @@ final class SortSessionViewController: UIViewController {
         flightOverlay.translatesAutoresizingMaskIntoConstraints = false
         mediaRegion.addSubview(flightOverlay)
         morph.flightOverlay = flightOverlay
+
+        buildCompletionView()
 
         // Resize grabber
         resizeGrabber.translatesAutoresizingMaskIntoConstraints = false
@@ -340,35 +354,36 @@ final class SortSessionViewController: UIViewController {
     // MARK: - Control bar
 
     private func configureControlBar() {
-        func button(_ btn: UIButton, _ symbol: String, _ action: @escaping () -> Void) {
+        func button(_ btn: UIButton, _ symbol: String, _ label: String, _ action: @escaping () -> Void) {
             btn.setImage(UIImage(systemName: symbol), for: .normal)
+            btn.accessibilityLabel = label
             btn.addAction(UIAction { _ in action() }, for: .touchUpInside)
             btn.translatesAutoresizingMaskIntoConstraints = false
             btn.widthAnchor.constraint(equalToConstant: 44).isActive = true
             btn.heightAnchor.constraint(equalToConstant: 36).isActive = true
             controlBar.addArrangedSubview(btn)
         }
-        button(undoButton, "arrow.uturn.backward") { [weak self] in self?.handleUndo() }
-        button(deleteButton, "trash") { [weak self] in
+        button(undoButton, "arrow.uturn.backward", "Undo") { [weak self] in self?.handleUndo() }
+        button(deleteButton, "trash", "Move to Trash") { [weak self] in
             guard let self else { return }
             self.commitVisiblePhotoIfBrowsing()
             Task { self.vm.isBulkMode ? await self.vm.bulkQueueDelete() : await self.vm.queueDelete() }
         }
         deleteButton.tintColor = .systemRed
-        button(skipButton, "arrow.right.to.line") { [weak self] in
+        button(skipButton, "arrow.right.to.line", "Skip") { [weak self] in
             guard let self else { return }
             self.commitVisiblePhotoIfBrowsing()
             Task { self.vm.isBulkMode ? await self.vm.bulkSkip() : await self.vm.skip() }
         }
-        button(favoriteButton, "heart") { [weak self] in
+        button(favoriteButton, "heart", "Favorite") { [weak self] in
             guard let self else { return }
             self.commitVisiblePhotoIfBrowsing()
             Task { self.vm.isBulkMode ? await self.vm.bulkToggleFavorite() : await self.vm.toggleFavorite() }
         }
         favoriteButton.tintColor = .secondaryLabel
-        button(zoomOutButton, "minus.magnifyingglass") { [weak self] in self?.changeColumns(by: +1) }
-        button(zoomInButton, "plus.magnifyingglass") { [weak self] in self?.changeColumns(by: -1) }
-        button(multiSelectButton, "rectangle.stack") { [weak self] in
+        button(zoomOutButton, "minus.magnifyingglass", "Zoom out, more albums per row") { [weak self] in self?.changeColumns(by: +1) }
+        button(zoomInButton, "plus.magnifyingglass", "Zoom in, fewer albums per row") { [weak self] in self?.changeColumns(by: -1) }
+        button(multiSelectButton, "rectangle.stack", "Multi-select albums") { [weak self] in
             guard let self else { return }
             Task {
                 self.vm.isMultiSelectActive ? await self.vm.deactivateMultiSelect() : await self.vm.activateMultiSelect()
@@ -474,8 +489,17 @@ final class SortSessionViewController: UIViewController {
         let isLoading = vm.isLoading
         let hasCurrent = vm.currentAsset != nil
         let showExtraAlert = vm.showExtraOnlyAlert
+        let writeErrorToken = vm.writeErrorToken
+        let writeErrorMessage = vm.writeErrorMessage
 
         guard isViewLoaded else { return }
+
+        // Surface a swallowed PhotoKit write failure as a transient banner. Token
+        // increments per failure, so repeats with the same text still show.
+        if writeErrorToken != lastWriteErrorToken {
+            lastWriteErrorToken = writeErrorToken
+            if let writeErrorMessage { presentWriteErrorBanner(writeErrorMessage) }
+        }
 
         // Top-level state.
         updateState(isLoading: isLoading, queueEmpty: queue.isEmpty, hasCurrent: hasCurrent, isBulk: isBulk)
@@ -539,24 +563,28 @@ final class SortSessionViewController: UIViewController {
             animated: didInitialContent
         )
 
-        // Control bar.
-        let bulkNoSelection = isBulk && selected.isEmpty
+        // Control bar. Skip / delete / favorite act on the current photo (or the
+        // bulk selection), so disable them when there's nothing to act on — e.g. the
+        // all-sorted done state, where the picker + Undo stay live.
+        let actionsDisabled = (isBulk && selected.isEmpty) || (!isBulk && !hasCurrent)
         if canUndo != lastCanUndo { lastCanUndo = canUndo; undoButton.isEnabled = canUndo }
-        if bulkNoSelection != lastBulkNoSelection {
-            lastBulkNoSelection = bulkNoSelection
-            deleteButton.isEnabled = !bulkNoSelection
-            skipButton.isEnabled = !bulkNoSelection
-            favoriteButton.isEnabled = !bulkNoSelection
+        if actionsDisabled != lastActionsDisabled {
+            lastActionsDisabled = actionsDisabled
+            deleteButton.isEnabled = !actionsDisabled
+            skipButton.isEnabled = !actionsDisabled
+            favoriteButton.isEnabled = !actionsDisabled
         }
         if favorite != lastFavorite {
             lastFavorite = favorite
             favoriteButton.setImage(UIImage(systemName: favorite ? "heart.fill" : "heart"), for: .normal)
             favoriteButton.tintColor = favorite ? .systemYellow : .secondaryLabel
+            favoriteButton.accessibilityValue = favorite ? "Favorited" : "Not favorited"
         }
         if multiSelect != lastMultiSelect {
             lastMultiSelect = multiSelect
             multiSelectButton.setImage(UIImage(systemName: multiSelect ? "rectangle.stack.fill" : "rectangle.stack"), for: .normal)
             multiSelectButton.tintColor = multiSelect ? (UIColor(named: "AccentColor") ?? .systemBlue) : .label
+            multiSelectButton.accessibilityValue = multiSelect ? "On" : "Off"
         }
         zoomOutButton.isEnabled = columnCount < 5
         zoomInButton.isEnabled = columnCount > 2
@@ -585,15 +613,21 @@ final class SortSessionViewController: UIViewController {
 
     private func updateState(isLoading: Bool, queueEmpty: Bool, hasCurrent: Bool, isBulk: Bool) {
         if isLoading {
-            showMessage(symbol: nil, title: "Scanning library…", body: nil, spinner: true)
-        } else if queueEmpty {
-            showMessage(symbol: "checkmark.seal.fill", title: "All Sorted!",
-                        body: "Every photo in this context belongs to at least one destination album.", spinner: false)
+            showLoading(title: "Scanning library…")
+            setCompletion(false)
+        } else if queueEmpty && !isBulk {
+            // Keep the album picker + control bar on screen; celebrate the finish in
+            // the media region where the carousel was.
+            setContentHidden(false)
+            messageView.isHidden = true
+            setCompletion(true)
         } else if hasCurrent || isBulk {
             setContentHidden(false)
             messageView.isHidden = true
+            setCompletion(false)
         } else {
-            showMessage(symbol: nil, title: nil, body: nil, spinner: true)
+            showLoading(title: nil)
+            setCompletion(false)
         }
     }
 
@@ -603,38 +637,116 @@ final class SortSessionViewController: UIViewController {
         }
     }
 
-    private func showMessage(symbol: String?, title: String?, body: String?, spinner: Bool) {
+    /// Full-screen loading takeover (spinner + optional title). The all-sorted
+    /// state is handled separately by `completionView`, in-region.
+    private func showLoading(title: String?) {
         setContentHidden(true)
         messageView.isHidden = false
         messageView.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        if spinner {
-            let s = UIActivityIndicatorView(style: .large)
-            s.startAnimating()
-            messageView.addArrangedSubview(s)
-        }
-        if let symbol {
-            let iv = UIImageView(image: UIImage(systemName: symbol))
-            iv.tintColor = .systemGreen
-            iv.preferredSymbolConfiguration = UIImage.SymbolConfiguration(textStyle: .largeTitle)
-            iv.contentMode = .center
-            messageView.addArrangedSubview(iv)
-        }
+        let s = UIActivityIndicatorView(style: .large)
+        s.startAnimating()
+        messageView.addArrangedSubview(s)
         if let title {
             let l = UILabel()
             l.text = title
             l.font = .preferredFont(forTextStyle: .title3).withWeight(.semibold)
+            l.adjustsFontForContentSizeCategory = true
             l.textAlignment = .center
             l.numberOfLines = 0
             messageView.addArrangedSubview(l)
         }
-        if let body {
-            let l = UILabel()
-            l.text = body
-            l.font = .preferredFont(forTextStyle: .subheadline)
-            l.textColor = .secondaryLabel
-            l.textAlignment = .center
-            l.numberOfLines = 0
-            messageView.addArrangedSubview(l)
+    }
+
+    // MARK: - Completion ("All Sorted") state
+
+    /// Builds the celebratory done view that lives inside the media region, so the
+    /// album picker + control bar stay on screen while it's shown.
+    private func buildCompletionView() {
+        completionView.isHidden = true
+        completionView.translatesAutoresizingMaskIntoConstraints = false
+        mediaRegion.addSubview(completionView)
+
+        completionCheckmark.image = UIImage(systemName: "checkmark.seal.fill")
+        completionCheckmark.tintColor = .systemGreen
+        completionCheckmark.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 52, weight: .semibold)
+        completionCheckmark.contentMode = .center
+        completionCheckmark.isAccessibilityElement = false
+
+        let title = UILabel()
+        title.text = "All Sorted!"
+        title.font = .preferredFont(forTextStyle: .title2).withWeight(.semibold)
+        title.adjustsFontForContentSizeCategory = true
+        title.textAlignment = .center
+
+        let subtitle = UILabel()
+        subtitle.text = "You've sorted every photo in this context."
+        subtitle.font = .preferredFont(forTextStyle: .subheadline)
+        subtitle.textColor = .secondaryLabel
+        subtitle.adjustsFontForContentSizeCategory = true
+        subtitle.numberOfLines = 0
+        subtitle.textAlignment = .center
+
+        let stack = UIStackView(arrangedSubviews: [completionCheckmark, title, subtitle])
+        stack.axis = .vertical
+        stack.alignment = .center
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        // Group the checkmark + text so VoiceOver reads it as one element.
+        stack.isAccessibilityElement = false
+        completionView.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            completionView.topAnchor.constraint(equalTo: mediaRegion.topAnchor),
+            completionView.leadingAnchor.constraint(equalTo: mediaRegion.leadingAnchor),
+            completionView.trailingAnchor.constraint(equalTo: mediaRegion.trailingAnchor),
+            completionView.bottomAnchor.constraint(equalTo: mediaRegion.bottomAnchor),
+
+            stack.centerXAnchor.constraint(equalTo: completionView.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: completionView.centerYAnchor),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: completionView.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: completionView.trailingAnchor, constant: -24),
+        ])
+    }
+
+    /// Show / hide the in-region done state. When shown it springs + bounces in
+    /// (instant under Reduce Motion); the album picker and control bar stay put.
+    private func setCompletion(_ show: Bool) {
+        guard show != lastCompletionShown else { return }
+        lastCompletionShown = show
+
+        if show {
+            mediaRegion.bringSubviewToFront(completionView)
+            completionView.isHidden = false
+            completionView.accessibilityElementsHidden = false
+
+            if UIAccessibility.isReduceMotionEnabled {
+                completionView.alpha = 1
+                completionView.transform = .identity
+            } else {
+                completionView.alpha = 0
+                completionView.transform = CGAffineTransform(scaleX: 0.85, y: 0.85)
+                UIView.animate(withDuration: 0.5, delay: 0,
+                               usingSpringWithDamping: 0.66, initialSpringVelocity: 0.3,
+                               options: [.allowUserInteraction]) {
+                    self.completionView.alpha = 1
+                    self.completionView.transform = .identity
+                }
+                completionCheckmark.addSymbolEffect(.bounce, options: .nonRepeating)
+            }
+        } else {
+            completionView.accessibilityElementsHidden = true
+            if UIAccessibility.isReduceMotionEnabled {
+                completionView.isHidden = true
+                completionView.alpha = 1
+                completionView.transform = .identity
+            } else {
+                UIView.animate(withDuration: 0.2) {
+                    self.completionView.alpha = 0
+                } completion: { _ in
+                    self.completionView.isHidden = true
+                    self.completionView.transform = .identity
+                }
+            }
         }
     }
 
@@ -782,6 +894,10 @@ final class SortSessionViewController: UIViewController {
 
     @discardableResult
     private func flyHeroToAlbum(albumID: String, heroID: String?) -> Bool {
+        // Reduce Motion: skip the decorative hero → album flight; the sort itself
+        // still happens via the VM. Returning false tells the caller not to mark a
+        // hero departure (which would blank the page awaiting a flight that never runs).
+        guard !UIAccessibility.isReduceMotionEnabled else { return false }
         guard let heroID, view.window != nil,
               let pageRect = carouselPageRect(in: albumFlightOverlay),
               let slot = album.firstSlotFrame(forAlbum: albumID, in: albumFlightOverlay)
@@ -840,7 +956,8 @@ final class SortSessionViewController: UIViewController {
     /// sort flight. Falls back to a plain undo otherwise.
     private func handleUndo() {
         var pending: (photoID: String, from: CGRect, image: UIImage?, fit: Bool)?
-        if case .sorted(let photoID, let albumID)? = vm.undoStack.last,
+        if !UIAccessibility.isReduceMotionEnabled,
+           case .sorted(let photoID, let albumID)? = vm.undoStack.last,
            let slot = album.firstSlotFrame(forAlbum: albumID, in: albumFlightOverlay),
            albumFlightOverlay.bounds.intersects(slot) {
             // Reuse the image we kept when this photo was sorted, so the flight can
@@ -947,9 +1064,11 @@ final class SortSessionViewController: UIViewController {
     private func updateNavBar() {
         navigationItem.title = navTitleText
 
-        // Leading: context list, more (trash/skipped), debug.
+        // Leading: context list, more (trash / skipped / debug).
         var leading: [UIBarButtonItem] = []
-        leading.append(UIBarButtonItem(image: UIImage(systemName: "list.bullet"), primaryAction: UIAction { [weak self] _ in self?.onShowContextList() }))
+        let contextsItem = UIBarButtonItem(image: UIImage(systemName: "list.bullet"), primaryAction: UIAction { [weak self] _ in self?.onShowContextList() })
+        contextsItem.accessibilityLabel = "Contexts"
+        leading.append(contextsItem)
 
         let trashAction = UIAction(title: trashCount > 0 ? "Trash (\(trashCount))" : "Trash",
                                    image: UIImage(systemName: "trash")) { [weak self] _ in self?.onShowTrash() }
@@ -957,16 +1076,26 @@ final class SortSessionViewController: UIViewController {
         let skippedAction = UIAction(title: skippedCount > 0 ? "Skipped (\(skippedCount))" : "Skipped",
                                      image: UIImage(systemName: "checkmark.circle")) { [weak self] _ in self?.onShowSkipped() }
         skippedAction.attributes = skippedCount == 0 ? [.disabled] : []
-        let moreMenu = UIMenu(children: [trashAction, skippedAction])
-        leading.append(UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: moreMenu))
 
-        if let onDebugClear {
-            let debug = UIAction(title: "Remove All Photos from Albums", image: UIImage(systemName: "xmark.bin"), attributes: .destructive) { _ in onDebugClear() }
-            let debugMenu = UIMenu(children: [debug])
-            let item = UIBarButtonItem(image: UIImage(systemName: "ladybug"), menu: debugMenu)
-            item.tintColor = .systemOrange
-            leading.append(item)
+        var moreChildren: [UIMenuElement] = [trashAction, skippedAction]
+        // Debug tools (DEBUG + simulator only — the closures are nil otherwise) live
+        // inline at the bottom of the More menu rather than in a separate bar button.
+        var debugActions: [UIAction] = []
+        if let onDebugShowOnboarding {
+            debugActions.append(UIAction(title: "Show Onboarding", image: UIImage(systemName: "sparkles")) { _ in onDebugShowOnboarding() })
         }
+        if let onDebugClear {
+            debugActions.append(UIAction(title: "Remove All Photos from Albums", image: UIImage(systemName: "xmark.bin"), attributes: .destructive) { _ in onDebugClear() })
+        }
+        if !debugActions.isEmpty {
+            moreChildren.append(UIMenu(title: "Debug", image: UIImage(systemName: "ladybug"),
+                                       options: .displayInline, children: debugActions))
+        }
+        let moreMenu = UIMenu(children: moreChildren)
+        let moreItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: moreMenu)
+        moreItem.accessibilityLabel = "More"
+        leading.append(moreItem)
+
         navigationItem.leftBarButtonItems = leading
 
         // Trailing: bulk toggle, edit context.
@@ -974,8 +1103,11 @@ final class SortSessionViewController: UIViewController {
             image: UIImage(systemName: vm.isBulkMode ? "square.grid.2x2.fill" : "square.grid.2x2"),
             primaryAction: UIAction { [weak self] _ in self?.toggleBulk() })
         bulkItem.tintColor = vm.isBulkMode ? (UIColor(named: "AccentColor") ?? .systemBlue) : .label
+        bulkItem.accessibilityLabel = "Bulk select"
+        bulkItem.accessibilityValue = vm.isBulkMode ? "On" : "Off"
         let editItem = UIBarButtonItem(image: UIImage(systemName: "slider.horizontal.3"),
                                        primaryAction: UIAction { [weak self] _ in self?.onEditContext() })
+        editItem.accessibilityLabel = "Edit context"
         navigationItem.rightBarButtonItems = [editItem, bulkItem]
     }
 
@@ -993,6 +1125,73 @@ final class SortSessionViewController: UIViewController {
             self?.vm.dismissExtraOnlyAlert()
         })
         present(alert, animated: true)
+    }
+
+    /// Transient top banner for a non-blocking write failure (e.g. an album add
+    /// that didn't save). Auto-dismisses; non-modal so it doesn't interrupt sorting.
+    private func presentWriteErrorBanner(_ message: String) {
+        writeErrorBanner?.removeFromSuperview()
+
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemThickMaterial))
+        blur.layer.cornerRadius = 16
+        blur.clipsToBounds = true
+        blur.translatesAutoresizingMaskIntoConstraints = false
+
+        let icon = UIImageView(image: UIImage(systemName: "exclamationmark.triangle.fill"))
+        icon.tintColor = .systemOrange
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        icon.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let label = UILabel()
+        label.text = message
+        label.font = .preferredFont(forTextStyle: .subheadline)
+        label.adjustsFontForContentSizeCategory = true
+        label.numberOfLines = 0
+
+        let stack = UIStackView(arrangedSubviews: [icon, label])
+        stack.spacing = 10
+        stack.alignment = .center
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        blur.contentView.addSubview(stack)
+
+        view.addSubview(blur)
+        writeErrorBanner = blur
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: blur.contentView.leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: blur.contentView.trailingAnchor, constant: -14),
+            stack.topAnchor.constraint(equalTo: blur.contentView.topAnchor, constant: 12),
+            stack.bottomAnchor.constraint(equalTo: blur.contentView.bottomAnchor, constant: -12),
+
+            blur.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 6),
+            blur.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 16),
+            blur.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -16),
+            blur.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+        ])
+
+        // Announce for VoiceOver users, who won't see the transient banner.
+        UIAccessibility.post(notification: .announcement, argument: message)
+
+        let animate = !UIAccessibility.isReduceMotionEnabled
+        blur.alpha = 0
+        blur.transform = CGAffineTransform(translationX: 0, y: -16)
+        UIView.animate(withDuration: animate ? 0.3 : 0) {
+            blur.alpha = 1
+            blur.transform = .identity
+        }
+
+        Haptics.warning()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.2) { [weak self, weak blur] in
+            guard let blur, blur === self?.writeErrorBanner else { return }
+            UIView.animate(withDuration: animate ? 0.25 : 0) {
+                blur.alpha = 0
+                blur.transform = CGAffineTransform(translationX: 0, y: -16)
+            } completion: { _ in
+                blur.removeFromSuperview()
+                if self?.writeErrorBanner === blur { self?.writeErrorBanner = nil }
+            }
+        }
     }
 }
 

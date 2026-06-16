@@ -109,12 +109,33 @@ final class PendingDelete {
     }
 }
 
-// MARK: - Container helper
+// MARK: - Versioned schema & migration plan
 
+/// The 1.0 schema. Anchoring a `VersionedSchema` now (rather than an unversioned
+/// model list) gives every future schema change a defined starting point: add a
+/// `SchemaV2`, append it to `MemeVaultMigrationPlan.schemas`, and describe the
+/// `MigrationStage` between them, instead of risking an unrecoverable open against
+/// an inferred schema.
+enum SchemaV1: VersionedSchema {
+    static var versionIdentifier = Schema.Version(1, 0, 0)
+
+    static var models: [any PersistentModel.Type] {
+        [OrgContext.self, PhotoSkip.self, PendingDelete.self]
+    }
+}
+
+enum MemeVaultMigrationPlan: SchemaMigrationPlan {
+    static var schemas: [any VersionedSchema.Type] {
+        [SchemaV1.self]
+    }
+
+    /// No migrations yet — V1 is the baseline. Future versions add stages here.
+    static var stages: [MigrationStage] {
+        []
+    }
+}
+
+/// Convenience for the current schema's model list (previews, in-memory containers).
 enum AppSchema {
-    static let models: [any PersistentModel.Type] = [
-        OrgContext.self,
-        PhotoSkip.self,
-        PendingDelete.self,
-    ]
+    static var models: [any PersistentModel.Type] { SchemaV1.models }
 }

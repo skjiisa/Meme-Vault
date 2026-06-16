@@ -173,6 +173,7 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
         let newRestoredIdx = ids.firstIndex(of: restoredID)
         let newShownIdx = shownID.flatMap { ids.firstIndex(of: $0) }
         let adjacent = animated && pageStride > 0
+            && !UIAccessibility.isReduceMotionEnabled
             && oldShownIdx != nil && newRestoredIdx != nil
             && newShownIdx == (newRestoredIdx ?? -2) + 1
 
@@ -411,7 +412,13 @@ final class PhotoPageCell: UICollectionViewCell {
     private let backdropImageView = UIImageView()
     private let foregroundImageView = UIImageView()
     private let spinner = UIActivityIndicatorView(style: .medium)
-    private let missingView = UIImageView()
+    // Missing / load-failure state: icon + message, plus a Retry button for the
+    // common "iCloud asset, offline" case (network access is allowed, so a retry
+    // once back online succeeds).
+    private let missingStack = UIStackView()
+    private let missingIcon = UIImageView()
+    private let missingLabel = UILabel()
+    private let missingRetryButton = UIButton(type: .system)
     private var playerLayer: AVPlayerLayer?
 
     private enum MediaKind { case image, gif, video }
@@ -463,12 +470,37 @@ final class PhotoPageCell: UICollectionViewCell {
         spinner.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(spinner)
 
-        missingView.image = UIImage(systemName: "exclamationmark.triangle")
-        missingView.tintColor = .secondaryLabel
-        missingView.contentMode = .center
-        missingView.isHidden = true
-        missingView.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(missingView)
+        missingIcon.tintColor = .secondaryLabel
+        missingIcon.contentMode = .center
+        missingIcon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(textStyle: .largeTitle)
+
+        missingLabel.font = .preferredFont(forTextStyle: .subheadline)
+        missingLabel.adjustsFontForContentSizeCategory = true
+        missingLabel.textColor = .secondaryLabel
+        missingLabel.textAlignment = .center
+        missingLabel.numberOfLines = 0
+
+        var retryConfig = UIButton.Configuration.tinted()
+        retryConfig.title = "Retry"
+        retryConfig.image = UIImage(systemName: "arrow.clockwise")
+        retryConfig.imagePadding = 4
+        retryConfig.buttonSize = .small
+        missingRetryButton.configuration = retryConfig
+        missingRetryButton.addAction(UIAction { [weak self] _ in self?.retryLoad() }, for: .touchUpInside)
+
+        missingStack.axis = .vertical
+        missingStack.alignment = .center
+        missingStack.spacing = 8
+        missingStack.isHidden = true
+        missingStack.translatesAutoresizingMaskIntoConstraints = false
+        missingStack.addArrangedSubview(missingIcon)
+        missingStack.addArrangedSubview(missingLabel)
+        missingStack.setCustomSpacing(12, after: missingLabel)
+        missingStack.addArrangedSubview(missingRetryButton)
+        card.addSubview(missingStack)
+
+        isAccessibilityElement = true
+        accessibilityTraits = .image
 
         NSLayoutConstraint.activate([
             card.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
@@ -493,8 +525,10 @@ final class PhotoPageCell: UICollectionViewCell {
 
             spinner.centerXAnchor.constraint(equalTo: card.centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: card.centerYAnchor),
-            missingView.centerXAnchor.constraint(equalTo: card.centerXAnchor),
-            missingView.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+            missingStack.centerXAnchor.constraint(equalTo: card.centerXAnchor),
+            missingStack.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+            missingStack.leadingAnchor.constraint(greaterThanOrEqualTo: card.leadingAnchor, constant: 20),
+            missingStack.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor, constant: -20),
         ])
     }
 
@@ -586,8 +620,9 @@ final class PhotoPageCell: UICollectionViewCell {
         foregroundImageView.animationImages = nil
         foregroundImageView.stopAnimating()
         phase = .loading
-        missingView.isHidden = true
+        missingStack.isHidden = true
         spinner.startAnimating()
+        accessibilityLabel = "Loading photo"
 
         let id = assetID ?? ""
         let size = targetSize
@@ -595,9 +630,11 @@ final class PhotoPageCell: UICollectionViewCell {
             let asset = await Task.detached(priority: .userInitiated) { AlbumService.asset(for: id) }.value
             guard let self, !Task.isCancelled, self.assetID == id else { return }
             guard let asset else {
+                // Asset itself is gone (deleted / removed from the library) — a
+                // retry can't recover it.
                 self.phase = .missing
                 self.spinner.stopAnimating()
-                self.missingView.isHidden = false
+                self.showMissing(retryable: false)
                 return
             }
             self.kind = Self.mediaKind(for: asset)
@@ -606,7 +643,15 @@ final class PhotoPageCell: UICollectionViewCell {
             self.spinner.stopAnimating()
             self.image = loaded
             self.phase = loaded == nil ? .missing : .loaded
-            self.missingView.isHidden = loaded != nil
+            if loaded == nil {
+                // The asset exists but its image couldn't be loaded — almost always
+                // an iCloud original that isn't downloaded and no connection. Offer
+                // a retry.
+                self.showMissing(retryable: true)
+            } else {
+                self.missingStack.isHidden = true
+                self.accessibilityLabel = self.kind == .video ? "Video" : "Photo"
+            }
             if let loaded {
                 self.foregroundImageView.image = loaded
                 // Real Gaussian blur, computed off-main (Core Image) so the decode
@@ -637,6 +682,25 @@ final class PhotoPageCell: UICollectionViewCell {
             }
             self.syncPlayback()
         }
+    }
+
+    /// Configure and show the missing/failure state. `retryable` distinguishes a
+    /// transient load failure (asset exists, e.g. iCloud + offline → show Retry)
+    /// from a permanently-gone asset (no Retry).
+    private func showMissing(retryable: Bool) {
+        missingIcon.image = UIImage(systemName: retryable ? "icloud.slash" : "photo.badge.exclamationmark")
+        missingLabel.text = retryable
+            ? "Couldn't load this photo.\nCheck your connection and try again."
+            : "This photo is no longer available."
+        missingRetryButton.isHidden = !retryable
+        missingStack.isHidden = false
+        accessibilityLabel = retryable ? "Couldn't load photo" : "Photo unavailable"
+        accessibilityHint = retryable ? "Double tap Retry to try loading again" : nil
+    }
+
+    private func retryLoad() {
+        missingStack.isHidden = true
+        loadStill()
     }
 
     // MARK: Playback
@@ -723,7 +787,8 @@ final class PhotoPageCell: UICollectionViewCell {
         foregroundImageView.alpha = 1
         backdropBlack.alpha = 1
         card.backgroundColor = .secondarySystemBackground
-        missingView.isHidden = true
+        missingStack.isHidden = true
+        accessibilityHint = nil
         spinner.stopAnimating()
     }
 

@@ -14,6 +14,7 @@ import Photos
 struct RootView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(PhotoLibrary.self) private var library
+    @Environment(\.scenePhase) private var scenePhase
 
     @Query(sort: \OrgContext.createdAt, order: .reverse)
     private var contexts: [OrgContext]
@@ -28,6 +29,8 @@ struct RootView: View {
 
     @AppStorage("startupContextUUID") private var startupContextUUID = ""
     @AppStorage("lastUsedContextUUID") private var lastUsedContextUUID = ""
+    @AppStorage("hasOnboarded") private var hasOnboarded = false
+    @AppStorage("hasSeenSortTip") private var hasSeenSortTip = false
 
     private var fallbackContext: OrgContext? {
         contexts.first { $0.isDefault } ?? contexts.first
@@ -55,6 +58,20 @@ struct RootView: View {
         return nil
     }
 
+    /// Debug "replay onboarding" action — resets the first-run flags so the intro
+    /// (and first-sort tip) show again. Simulator + DEBUG only.
+    private var debugShowOnboardingAction: (() -> Void)? {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["SIMULATOR_DEVICE_NAME"] != nil {
+            return {
+                hasSeenSortTip = false
+                hasOnboarded = false
+            }
+        }
+        #endif
+        return nil
+    }
+
     /// The context currently on screen: explicit selection, or the primary default.
     private var displayedContext: OrgContext? {
         if let selected = selectedContext,
@@ -67,7 +84,14 @@ struct RootView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if !library.isAuthorized {
+                if !hasOnboarded {
+                    OnboardingView(onFinished: {
+                        hasOnboarded = true
+                        ensureDefaultContext()
+                    })
+                    // Full takeover — hide the SwiftUI nav bar behind the intro.
+                    .toolbar(.hidden, for: .navigationBar)
+                } else if !library.isAuthorized {
                     AuthorizationGateView()
                 } else if let ctx = displayedContext {
                     SortSessionView(
@@ -75,7 +99,8 @@ struct RootView: View {
                         onShowContextList: { showingContextList = true },
                         onShowTrash: { photoMode = .trash },
                         onShowSkipped: { photoMode = .skipped(ctx) },
-                        onDebugClear: debugClearAction
+                        onDebugClear: debugClearAction,
+                        onDebugShowOnboarding: debugShowOnboardingAction
                     )
                     .id("\(ctx.uuid.uuidString)-\(sessionResetTick)")
                 } else {
@@ -90,23 +115,7 @@ struct RootView: View {
                     onShowContextList: { showingContextList = true },
                     onSelectMode: { photoMode = $0 }
                 )
-                
-                #if DEBUG
-                ToolbarItem(placement: .topBarLeading) {
-                    if isSimulator {
-                        Menu {
-                            Button(role: .destructive) {
-                                showingDebugConfirm = true
-                            } label: {
-                                Label("Remove All Photos from Albums", systemImage: "xmark.bin")
-                            }
-                        } label: {
-                            Image(systemName: "ladybug")
-                                .foregroundStyle(.orange)
-                        }
-                    }
-                }
-                #endif
+                // Debug tools now live in the sort screen's UIKit "More" (…) menu.
             }
             .sheet(isPresented: $showingContextList, onDismiss: {
                 if let pending = pendingContext {
@@ -144,12 +153,24 @@ struct RootView: View {
             }
         }
         .task {
-            await library.requestAuthorization()
+            // First run requests access from the onboarding flow instead, so the
+            // system prompt lands with context rather than cold on launch.
+            if hasOnboarded {
+                await library.requestAuthorization()
+            }
             ensureDefaultContext()
         }
         .onChange(of: displayedContext?.uuid, initial: true) { _, newUUID in
             if let uuid = newUUID {
                 lastUsedContextUUID = uuid.uuidString
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // Pick up an access change made in Settings (e.g. Limited → Full) when
+            // the user returns, so the gate clears without a relaunch.
+            if phase == .active {
+                library.refreshAuthorizationStatus()
+                ensureDefaultContext()
             }
         }
     }
@@ -175,10 +196,6 @@ struct RootView: View {
     // MARK: - Debug
 
     #if DEBUG
-    private var isSimulator: Bool {
-        ProcessInfo.processInfo.environment["SIMULATOR_DEVICE_NAME"] != nil
-    }
-
     private func debugClearAlbums() async {
         do {
             try await AlbumService.debugRemoveAllAssetsFromAllAlbums()
@@ -215,8 +232,9 @@ private struct ToolbarBadges: ToolbarContent {
             Button { onShowContextList() } label: {
                 Image(systemName: "list.bullet")
             }
+            .accessibilityLabel("Contexts")
         }
-        
+
         ToolbarItem(placement: .topBarLeading) {
             Menu {
                 Button {
@@ -250,11 +268,35 @@ private struct ToolbarBadges: ToolbarContent {
 private struct AuthorizationGateView: View {
     @Environment(PhotoLibrary.self) private var library
 
+    /// Why access is needed, tailored to the current status. Full access is
+    /// required because sorting into existing albums means the app must be able to
+    /// see every album — limited access exposes only hand-picked photos and no albums.
+    private var explanation: String {
+        switch library.authorization {
+        case .limited:
+            return "Meme Vault sorts your photos into your existing albums, so it needs to see your whole library. “Limited” access hides your albums, so the app can't work. Please choose Full Access in Settings."
+        case .denied, .restricted:
+            return "Meme Vault sorts your photos into your existing albums, so it needs full access to your photo library. Please allow Full Access in Settings."
+        default:
+            return "Meme Vault sorts your photos into your existing albums, so it needs full access to your photo library."
+        }
+    }
+
     var body: some View {
         ContentUnavailableView {
-            Label("Photo Access Needed", systemImage: "photo.badge.exclamationmark")
+            Label("Full Photo Access Needed", systemImage: "photo.badge.exclamationmark")
         } description: {
-            Text("Meme Vault needs access to your photo library to organize your photos.")
+            VStack(spacing: 14) {
+                Text(explanation)
+                Label {
+                    Text("Your photos never leave your device. Meme Vault doesn't collect, upload, or share any of your photos or data.")
+                } icon: {
+                    Image(systemName: "lock.fill")
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            }
+            .multilineTextAlignment(.center)
         } actions: {
             switch library.authorization {
             case .notDetermined:
@@ -262,7 +304,7 @@ private struct AuthorizationGateView: View {
                     Task { await library.requestAuthorization() }
                 }
                 .buttonStyle(.borderedProminent)
-            case .denied, .restricted:
+            case .limited, .denied, .restricted:
                 Button("Open Settings") {
                     if let url = URL(string: UIApplication.openSettingsURLString) {
                         UIApplication.shared.open(url)

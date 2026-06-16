@@ -252,6 +252,7 @@ struct PhotoCollectionView: View {
         case .album:
             break
         }
+        try? modelContext.save()
     }
 
     private func deleteItem(assetID: String) {
