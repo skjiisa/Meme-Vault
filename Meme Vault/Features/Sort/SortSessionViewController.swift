@@ -49,7 +49,12 @@ final class SortSessionViewController: UIViewController {
     private let flightOverlay = UIView()       // hero-zoom, over the carousel
     private let albumFlightOverlay = UIView()  // hero → album-slot, over everything
     private let resizeGrabber = UIView()
-    private let controlBar = UIStackView()
+    private let controlBar = UIStackView()   // row of grouped glass capsules
+    private let controlBarContainer: UIVisualEffectView = {
+        let effect = UIGlassContainerEffect()
+        effect.spacing = 0   // keep groups as distinct capsules (no merging)
+        return UIVisualEffectView(effect: effect)
+    }()
     private let messageView = UIStackView()    // loading spinner (full-screen)
 
     // "All sorted" celebration shown *inside* the media region, so the album
@@ -176,7 +181,11 @@ final class SortSessionViewController: UIViewController {
     /// Top/bottom safe-area handling — the single source of truth that replaces
     /// the old SwiftUI `.onGeometryChange(.global)` plumbing.
     private func applyInsets() {
-        album.setBottomInset(view.safeAreaInsets.bottom)
+        // Inset the grid so its content scrolls clear of the floating glass
+        // toolbar (whose top sits above the bottom safe area), plus a small gap.
+        let toolbarClearance = max(view.safeAreaInsets.bottom,
+                                   view.bounds.maxY - controlBarContainer.frame.minY + 8)
+        album.setBottomInset(toolbarClearance)
         let topSafeInset = view.safeAreaInsets.top
         let regionTopInset = mediaRegion.frame.minY
         morph.applyBulkInsets(topConstraint: morphTopConstraint, topSafeInset: topSafeInset, regionTopInset: regionTopInset)
@@ -238,16 +247,20 @@ final class SortSessionViewController: UIViewController {
         grabBar.translatesAutoresizingMaskIntoConstraints = false
         resizeGrabber.addSubview(grabBar)
 
-        // Control bar
+        // Control bar — a floating Liquid Glass toolbar at the bottom, split into
+        // logical button groups (each its own glass capsule) inside one container.
         controlBar.axis = .horizontal
         controlBar.distribution = .equalSpacing
         controlBar.alignment = .center
         controlBar.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(controlBar)
+        controlBarContainer.translatesAutoresizingMaskIntoConstraints = false
+        controlBarContainer.contentView.addSubview(controlBar)
 
-        // Album grid
+        // Album grid (fills behind the floating toolbar)
         album.collectionView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(album.collectionView)
+        // Added after the grid so the glass toolbar floats above it.
+        view.addSubview(controlBarContainer)
 
         // Top-level album flight overlay
         albumFlightOverlay.isUserInteractionEnabled = false
@@ -308,14 +321,22 @@ final class SortSessionViewController: UIViewController {
             grabBar.widthAnchor.constraint(equalToConstant: 36),
             grabBar.heightAnchor.constraint(equalToConstant: 5),
 
-            controlBar.topAnchor.constraint(equalTo: resizeGrabber.bottomAnchor),
-            controlBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            controlBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-
-            album.collectionView.topAnchor.constraint(equalTo: controlBar.bottomAnchor, constant: 6),
+            // Album grid fills from the grabber down to the bottom; the glass
+            // toolbar floats over it and the grid scrolls clear via bottom inset.
+            album.collectionView.topAnchor.constraint(equalTo: resizeGrabber.bottomAnchor, constant: 6),
             album.collectionView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             album.collectionView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             album.collectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            // Floating Liquid Glass toolbar pinned to the bottom safe area.
+            controlBarContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            controlBarContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            controlBarContainer.bottomAnchor.constraint(equalTo: safe.bottomAnchor, constant: -8),
+
+            controlBar.topAnchor.constraint(equalTo: controlBarContainer.contentView.topAnchor),
+            controlBar.bottomAnchor.constraint(equalTo: controlBarContainer.contentView.bottomAnchor),
+            controlBar.leadingAnchor.constraint(equalTo: controlBarContainer.contentView.leadingAnchor),
+            controlBar.trailingAnchor.constraint(equalTo: controlBarContainer.contentView.trailingAnchor),
 
             albumFlightOverlay.topAnchor.constraint(equalTo: view.topAnchor),
             albumFlightOverlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -361,7 +382,6 @@ final class SortSessionViewController: UIViewController {
             btn.translatesAutoresizingMaskIntoConstraints = false
             btn.widthAnchor.constraint(equalToConstant: 44).isActive = true
             btn.heightAnchor.constraint(equalToConstant: 36).isActive = true
-            controlBar.addArrangedSubview(btn)
         }
         button(undoButton, "arrow.uturn.backward", "Undo") { [weak self] in self?.handleUndo() }
         button(deleteButton, "trash", "Move to Trash") { [weak self] in
@@ -389,6 +409,33 @@ final class SortSessionViewController: UIViewController {
                 self.vm.isMultiSelectActive ? await self.vm.deactivateMultiSelect() : await self.vm.activateMultiSelect()
             }
         }
+
+        // Wrap a logical set of buttons in their own Liquid Glass capsule.
+        func group(_ buttons: UIButton...) {
+            let row = UIStackView(arrangedSubviews: buttons)
+            row.axis = .horizontal
+            row.alignment = .center
+            row.spacing = 2
+            row.translatesAutoresizingMaskIntoConstraints = false
+            let glass = UIGlassEffect()
+            glass.isInteractive = true
+            let pill = UIVisualEffectView(effect: glass)
+            pill.cornerConfiguration = .capsule()
+            pill.translatesAutoresizingMaskIntoConstraints = false
+            pill.contentView.addSubview(row)
+            NSLayoutConstraint.activate([
+                row.topAnchor.constraint(equalTo: pill.contentView.topAnchor, constant: 8),
+                row.bottomAnchor.constraint(equalTo: pill.contentView.bottomAnchor, constant: -8),
+                row.leadingAnchor.constraint(equalTo: pill.contentView.leadingAnchor, constant: 6),
+                row.trailingAnchor.constraint(equalTo: pill.contentView.trailingAnchor, constant: -6),
+            ])
+            controlBar.addArrangedSubview(pill)
+        }
+
+        // Undo · photo actions · grid view & selection.
+        group(undoButton)
+        group(deleteButton, skipButton, favoriteButton)
+        group(zoomOutButton, zoomInButton, multiSelectButton)
     }
 
     private func changeColumns(by delta: Int) {
@@ -632,7 +679,7 @@ final class SortSessionViewController: UIViewController {
     }
 
     private func setContentHidden(_ hidden: Bool) {
-        for v in [headerContainer, mediaRegion, resizeGrabber, controlBar, album.collectionView] {
+        for v in [headerContainer, mediaRegion, resizeGrabber, controlBarContainer, album.collectionView] {
             v.isHidden = hidden
         }
     }
