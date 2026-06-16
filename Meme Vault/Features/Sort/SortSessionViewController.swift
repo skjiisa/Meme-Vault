@@ -49,7 +49,12 @@ final class SortSessionViewController: UIViewController {
     private let flightOverlay = UIView()       // hero-zoom, over the carousel
     private let albumFlightOverlay = UIView()  // hero → album-slot, over everything
     private let resizeGrabber = UIView()
-    private let controlBar = UIStackView()
+    private let controlBar = UIStackView()   // row of grouped glass capsules
+    private let controlBarContainer: UIVisualEffectView = {
+        let effect = UIGlassContainerEffect()
+        effect.spacing = 0   // keep groups as distinct capsules (no merging)
+        return UIVisualEffectView(effect: effect)
+    }()
     private let messageView = UIStackView()    // loading spinner (full-screen)
 
     // "All sorted" celebration shown *inside* the media region, so the album
@@ -57,6 +62,16 @@ final class SortSessionViewController: UIViewController {
     private let completionView = UIView()
     private let completionCheckmark = UIImageView()
     private var lastCompletionShown = false
+
+    // Photo-grid zoom bar — a floating Liquid Glass capsule shown in multi-select
+    // mode, sitting in the strip band, that zooms the bulk photo grid.
+    private let photoGridZoomBar: UIVisualEffectView = {
+        let glass = UIGlassEffect()
+        glass.isInteractive = true
+        return UIVisualEffectView(effect: glass)
+    }()
+    private let photoZoomOutButton = UIButton(type: .system)
+    private let photoZoomInButton = UIButton(type: .system)
 
     // Control-bar buttons (kept to update enabled / image state).
     private let undoButton = UIButton(type: .system)
@@ -84,6 +99,12 @@ final class SortSessionViewController: UIViewController {
 
     // Column count for the album grid.
     private var columnCount = 3
+
+    // Column count for the bulk multi-select photo grid.
+    private var photoColumnCount = 5
+    private let minPhotoColumns = 3
+    private let maxPhotoColumns = 7
+    private let photoZoomBarClearance: CGFloat = 56
 
     // Hero image reported by the carousel's active page (for the flights).
     private var heroImage: UIImage?
@@ -121,12 +142,14 @@ final class SortSessionViewController: UIViewController {
     private var writeErrorBanner: UIView?
 
     private let columnKey: String
+    private let photoColumnKey: String
     private let photoHeightKey: String
 
     init(vm: SortSessionViewModel) {
         self.vm = vm
         self.context = vm.context
         self.columnKey = "albumGridColumns_\(vm.context.uuid.uuidString)"
+        self.photoColumnKey = "photoGridColumns_\(vm.context.uuid.uuidString)"
         self.photoHeightKey = "photoHeight_\(vm.context.uuid.uuidString)"
         super.init(nibName: nil, bundle: nil)
     }
@@ -143,6 +166,10 @@ final class SortSessionViewController: UIViewController {
 
         columnCount = (UserDefaults.standard.object(forKey: columnKey) as? Int) ?? 3
         album.columns = max(2, min(5, columnCount))
+        photoColumnCount = max(minPhotoColumns, min(maxPhotoColumns,
+            (UserDefaults.standard.object(forKey: photoColumnKey) as? Int) ?? 5))
+        morph.gridColumns = photoColumnCount
+        morph.gridBottomInset = photoZoomBarClearance
         if let stored = UserDefaults.standard.object(forKey: photoHeightKey) as? Double {
             photoHeight = CGFloat(stored)
         }
@@ -150,6 +177,7 @@ final class SortSessionViewController: UIViewController {
         buildHierarchy()
         wireRegions()
         configureControlBar()
+        configurePhotoZoomBar()
         configureGrabber()
         updateNavBar()
         observeVM()
@@ -176,7 +204,11 @@ final class SortSessionViewController: UIViewController {
     /// Top/bottom safe-area handling — the single source of truth that replaces
     /// the old SwiftUI `.onGeometryChange(.global)` plumbing.
     private func applyInsets() {
-        album.setBottomInset(view.safeAreaInsets.bottom)
+        // Inset the grid so its content scrolls clear of the floating glass
+        // toolbar (whose top sits above the bottom safe area), plus a small gap.
+        let toolbarClearance = max(view.safeAreaInsets.bottom,
+                                   view.bounds.maxY - controlBarContainer.frame.minY + 8)
+        album.setBottomInset(toolbarClearance)
         let topSafeInset = view.safeAreaInsets.top
         let regionTopInset = mediaRegion.frame.minY
         morph.applyBulkInsets(topConstraint: morphTopConstraint, topSafeInset: topSafeInset, regionTopInset: regionTopInset)
@@ -229,6 +261,13 @@ final class SortSessionViewController: UIViewController {
 
         buildCompletionView()
 
+        // Photo-grid zoom bar — floats in the strip band, shown only in bulk mode.
+        photoGridZoomBar.translatesAutoresizingMaskIntoConstraints = false
+        photoGridZoomBar.cornerConfiguration = .capsule()
+        photoGridZoomBar.isHidden = true
+        photoGridZoomBar.alpha = 0
+        mediaRegion.addSubview(photoGridZoomBar)
+
         // Resize grabber
         resizeGrabber.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(resizeGrabber)
@@ -238,16 +277,20 @@ final class SortSessionViewController: UIViewController {
         grabBar.translatesAutoresizingMaskIntoConstraints = false
         resizeGrabber.addSubview(grabBar)
 
-        // Control bar
+        // Control bar — a floating Liquid Glass toolbar at the bottom, split into
+        // logical button groups (each its own glass capsule) inside one container.
         controlBar.axis = .horizontal
         controlBar.distribution = .equalSpacing
         controlBar.alignment = .center
         controlBar.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(controlBar)
+        controlBarContainer.translatesAutoresizingMaskIntoConstraints = false
+        controlBarContainer.contentView.addSubview(controlBar)
 
-        // Album grid
+        // Album grid (fills behind the floating toolbar)
         album.collectionView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(album.collectionView)
+        // Added after the grid so the glass toolbar floats above it.
+        view.addSubview(controlBarContainer)
 
         // Top-level album flight overlay
         albumFlightOverlay.isUserInteractionEnabled = false
@@ -299,6 +342,9 @@ final class SortSessionViewController: UIViewController {
             flightOverlay.trailingAnchor.constraint(equalTo: mediaRegion.trailingAnchor),
             flightOverlay.bottomAnchor.constraint(equalTo: mediaRegion.bottomAnchor),
 
+            photoGridZoomBar.leadingAnchor.constraint(equalTo: mediaRegion.leadingAnchor, constant: 16),
+            photoGridZoomBar.bottomAnchor.constraint(equalTo: mediaRegion.bottomAnchor, constant: -6),
+
             resizeGrabber.topAnchor.constraint(equalTo: mediaRegion.bottomAnchor),
             resizeGrabber.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             resizeGrabber.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -308,14 +354,22 @@ final class SortSessionViewController: UIViewController {
             grabBar.widthAnchor.constraint(equalToConstant: 36),
             grabBar.heightAnchor.constraint(equalToConstant: 5),
 
-            controlBar.topAnchor.constraint(equalTo: resizeGrabber.bottomAnchor),
-            controlBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            controlBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-
-            album.collectionView.topAnchor.constraint(equalTo: controlBar.bottomAnchor, constant: 6),
+            // Album grid fills from the grabber down to the bottom; the glass
+            // toolbar floats over it and the grid scrolls clear via bottom inset.
+            album.collectionView.topAnchor.constraint(equalTo: resizeGrabber.bottomAnchor, constant: 6),
             album.collectionView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             album.collectionView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             album.collectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            // Floating Liquid Glass toolbar pinned to the bottom safe area.
+            controlBarContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            controlBarContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            controlBarContainer.bottomAnchor.constraint(equalTo: safe.bottomAnchor, constant: -8),
+
+            controlBar.topAnchor.constraint(equalTo: controlBarContainer.contentView.topAnchor),
+            controlBar.bottomAnchor.constraint(equalTo: controlBarContainer.contentView.bottomAnchor),
+            controlBar.leadingAnchor.constraint(equalTo: controlBarContainer.contentView.leadingAnchor),
+            controlBar.trailingAnchor.constraint(equalTo: controlBarContainer.contentView.trailingAnchor),
 
             albumFlightOverlay.topAnchor.constraint(equalTo: view.topAnchor),
             albumFlightOverlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -361,7 +415,6 @@ final class SortSessionViewController: UIViewController {
             btn.translatesAutoresizingMaskIntoConstraints = false
             btn.widthAnchor.constraint(equalToConstant: 44).isActive = true
             btn.heightAnchor.constraint(equalToConstant: 36).isActive = true
-            controlBar.addArrangedSubview(btn)
         }
         button(undoButton, "arrow.uturn.backward", "Undo") { [weak self] in self?.handleUndo() }
         button(deleteButton, "trash", "Move to Trash") { [weak self] in
@@ -389,6 +442,33 @@ final class SortSessionViewController: UIViewController {
                 self.vm.isMultiSelectActive ? await self.vm.deactivateMultiSelect() : await self.vm.activateMultiSelect()
             }
         }
+
+        // Wrap a logical set of buttons in their own Liquid Glass capsule.
+        func group(_ buttons: UIButton...) {
+            let row = UIStackView(arrangedSubviews: buttons)
+            row.axis = .horizontal
+            row.alignment = .center
+            row.spacing = 2
+            row.translatesAutoresizingMaskIntoConstraints = false
+            let glass = UIGlassEffect()
+            glass.isInteractive = true
+            let pill = UIVisualEffectView(effect: glass)
+            pill.cornerConfiguration = .capsule()
+            pill.translatesAutoresizingMaskIntoConstraints = false
+            pill.contentView.addSubview(row)
+            NSLayoutConstraint.activate([
+                row.topAnchor.constraint(equalTo: pill.contentView.topAnchor, constant: 8),
+                row.bottomAnchor.constraint(equalTo: pill.contentView.bottomAnchor, constant: -8),
+                row.leadingAnchor.constraint(equalTo: pill.contentView.leadingAnchor, constant: 6),
+                row.trailingAnchor.constraint(equalTo: pill.contentView.trailingAnchor, constant: -6),
+            ])
+            controlBar.addArrangedSubview(pill)
+        }
+
+        // Undo · photo actions · grid view & selection.
+        group(undoButton)
+        group(deleteButton, skipButton, favoriteButton)
+        group(zoomOutButton, zoomInButton, multiSelectButton)
     }
 
     private func changeColumns(by delta: Int) {
@@ -399,6 +479,45 @@ final class SortSessionViewController: UIViewController {
         album.setColumns(new, animated: true)
         zoomOutButton.isEnabled = columnCount < 5
         zoomInButton.isEnabled = columnCount > 2
+    }
+
+    // MARK: - Photo-grid zoom bar
+
+    private func configurePhotoZoomBar() {
+        func button(_ btn: UIButton, _ symbol: String, _ action: @escaping () -> Void) {
+            btn.setImage(UIImage(systemName: symbol), for: .normal)
+            btn.addAction(UIAction { _ in action() }, for: .touchUpInside)
+            btn.translatesAutoresizingMaskIntoConstraints = false
+            btn.widthAnchor.constraint(equalToConstant: 44).isActive = true
+            btn.heightAnchor.constraint(equalToConstant: 32).isActive = true
+        }
+        button(photoZoomOutButton, "minus.magnifyingglass") { [weak self] in self?.changePhotoColumns(by: +1) }
+        button(photoZoomInButton, "plus.magnifyingglass") { [weak self] in self?.changePhotoColumns(by: -1) }
+
+        let row = UIStackView(arrangedSubviews: [photoZoomOutButton, photoZoomInButton])
+        row.axis = .horizontal
+        row.alignment = .center
+        row.spacing = 2
+        row.translatesAutoresizingMaskIntoConstraints = false
+        photoGridZoomBar.contentView.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.topAnchor.constraint(equalTo: photoGridZoomBar.contentView.topAnchor, constant: 6),
+            row.bottomAnchor.constraint(equalTo: photoGridZoomBar.contentView.bottomAnchor, constant: -6),
+            row.leadingAnchor.constraint(equalTo: photoGridZoomBar.contentView.leadingAnchor, constant: 6),
+            row.trailingAnchor.constraint(equalTo: photoGridZoomBar.contentView.trailingAnchor, constant: -6),
+        ])
+        photoZoomOutButton.isEnabled = photoColumnCount < maxPhotoColumns
+        photoZoomInButton.isEnabled = photoColumnCount > minPhotoColumns
+    }
+
+    private func changePhotoColumns(by delta: Int) {
+        let new = max(minPhotoColumns, min(maxPhotoColumns, photoColumnCount + delta))
+        guard new != photoColumnCount else { return }
+        photoColumnCount = new
+        UserDefaults.standard.set(new, forKey: photoColumnKey)
+        morph.setGridColumns(new, animated: true)
+        photoZoomOutButton.isEnabled = photoColumnCount < maxPhotoColumns
+        photoZoomInButton.isEnabled = photoColumnCount > minPhotoColumns
     }
 
     // MARK: - Resize grabber
@@ -632,7 +751,7 @@ final class SortSessionViewController: UIViewController {
     }
 
     private func setContentHidden(_ hidden: Bool) {
-        for v in [headerContainer, mediaRegion, resizeGrabber, controlBar, album.collectionView] {
+        for v in [headerContainer, mediaRegion, resizeGrabber, controlBarContainer, album.collectionView] {
             v.isHidden = hidden
         }
     }
@@ -803,7 +922,11 @@ final class SortSessionViewController: UIViewController {
 
         carousel.isForeground = false
         carousel.collectionView.isUserInteractionEnabled = false
-        UIView.animate(withDuration: 0.3) { self.carousel.collectionView.alpha = 0 }
+        photoGridZoomBar.isHidden = false
+        UIView.animate(withDuration: 0.3) {
+            self.carousel.collectionView.alpha = 0
+            self.photoGridZoomBar.alpha = 1
+        }
 
         view.layoutIfNeeded()
         morph.enterBulk(
@@ -849,7 +972,10 @@ final class SortSessionViewController: UIViewController {
 
         carousel.isForeground = true
         carousel.collectionView.isUserInteractionEnabled = true
-        UIView.animate(withDuration: 0.3) { self.carousel.collectionView.alpha = 1 }
+        UIView.animate(withDuration: 0.3) {
+            self.carousel.collectionView.alpha = 1
+            self.photoGridZoomBar.alpha = 0
+        } completion: { _ in self.photoGridZoomBar.isHidden = true }
 
         view.layoutIfNeeded()
         morph.exitBulk(
