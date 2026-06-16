@@ -59,6 +59,12 @@ final class MorphController: NSObject, UICollectionViewDelegate, UICollectionVie
     private(set) var isBulkMode = false
     var targetSize: CGSize = .zero
 
+    /// Column count for the bulk multi-select grid (the browse strip is unaffected).
+    var gridColumns = 5
+    /// Bottom content inset applied in bulk so the last rows clear the floating
+    /// photo-grid zoom bar that overlays the strip band.
+    var gridBottomInset: CGFloat = 0
+
     /// Asset whose cell is hidden because the hero flight is currently drawing it
     /// as a floating image view; the cell reappears when the flight ends.
     private var flightHiddenID: String?
@@ -198,6 +204,24 @@ final class MorphController: NSObject, UICollectionViewDelegate, UICollectionVie
             collectionView.contentInset.top = inset
             collectionView.verticalScrollIndicatorInsets.top = inset
         }
+        let bottom = isBulkMode ? gridBottomInset : 0
+        if collectionView.contentInset.bottom != bottom {
+            collectionView.contentInset.bottom = bottom
+            collectionView.verticalScrollIndicatorInsets.bottom = bottom
+        }
+    }
+
+    /// Re-layout the bulk grid at a new column count (mirrors the album grid's
+    /// zoom). Stores the count so the next enter-bulk uses it; animates the change
+    /// when the grid is currently visible.
+    func setGridColumns(_ columns: Int, animated: Bool) {
+        guard columns != gridColumns else { return }
+        gridColumns = columns
+        guard isBulkMode else { return }
+        let layout = MorphLayout()
+        layout.mode = .grid
+        layout.columns = columns
+        collectionView.setCollectionViewLayout(layout, animated: animated)
     }
 
     // MARK: - Mode transition
@@ -219,6 +243,7 @@ final class MorphController: NSObject, UICollectionViewDelegate, UICollectionVie
         applyBulkInsets(topConstraint: topConstraint, topSafeInset: topSafeInset, regionTopInset: regionTopInset)
         let layout = MorphLayout()
         layout.mode = .grid
+        layout.columns = gridColumns
         collectionView.setCollectionViewLayout(layout, animated: animationsEnabled)
         scrollGridToCurrent()
         reconfigure(assetIDs)
@@ -441,7 +466,7 @@ final class MorphLayout: UICollectionViewLayout {
 
     var mode: Mode = .strip
 
-    private let columns = 5
+    var columns = 5
     private let gridSpacing: CGFloat = 3
     private let stripSpacing: CGFloat = 6
     private let stripCell: CGFloat = 36
