@@ -239,6 +239,10 @@ final class MorphController: NSObject, UICollectionViewDelegate, UICollectionVie
     ) {
         isBulkMode = true
         collectionView.showsVerticalScrollIndicator = true
+        // Clip the grid to its frame so scrolled rows stop at the media-region
+        // bottom (above the drag handle) instead of bleeding over the destination
+        // grid. Browse leaves clipping off so the strip/flight can overflow.
+        collectionView.clipsToBounds = true
         let stripFrame = currentCellOnScreenFrame()
         applyBulkInsets(topConstraint: topConstraint, topSafeInset: topSafeInset, regionTopInset: regionTopInset)
         let layout = MorphLayout()
@@ -263,6 +267,7 @@ final class MorphController: NSObject, UICollectionViewDelegate, UICollectionVie
     ) {
         isBulkMode = false
         collectionView.showsVerticalScrollIndicator = false
+        collectionView.clipsToBounds = false
         runHeroFlight(entering: false, mediaRegionBounds: mediaRegionBounds, onFlightComplete: onFlightComplete)
         applyBulkInsets(topConstraint: topConstraint, topSafeInset: topSafeInset, regionTopInset: regionTopInset)
         let layout = MorphLayout()
