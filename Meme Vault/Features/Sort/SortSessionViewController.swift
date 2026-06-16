@@ -17,6 +17,7 @@
 
 import UIKit
 import Photos
+import PhotosUI
 import Observation
 
 @MainActor
@@ -49,7 +50,14 @@ final class SortSessionViewController: UIViewController {
     private let albumFlightOverlay = UIView()  // hero → album-slot, over everything
     private let resizeGrabber = UIView()
     private let controlBar = UIStackView()
-    private let messageView = UIStackView()    // loading / all-sorted
+    private let messageView = UIStackView()    // loading spinner (full-screen)
+
+    // "All sorted" celebration shown *inside* the media region, so the album
+    // picker + control bar stay on screen behind/around it.
+    private let completionView = UIView()
+    private let completionCheckmark = UIImageView()
+    private let completionMoreButton = UIButton(type: .system)
+    private var lastCompletionShown = false
 
     // Control-bar buttons (kept to update enabled / image state).
     private let undoButton = UIButton(type: .system)
@@ -102,7 +110,7 @@ final class SortSessionViewController: UIViewController {
     private var lastMultiSelect = false
     private var lastFavorite = false
     private var lastCanUndo = false
-    private var lastBulkNoSelection = false
+    private var lastActionsDisabled = false
     private var lastProgress = ""
     private var lastSatisfied = false
     private var lastDeparted: String?
@@ -216,6 +224,8 @@ final class SortSessionViewController: UIViewController {
         flightOverlay.translatesAutoresizingMaskIntoConstraints = false
         mediaRegion.addSubview(flightOverlay)
         morph.flightOverlay = flightOverlay
+
+        buildCompletionView()
 
         // Resize grabber
         resizeGrabber.translatesAutoresizingMaskIntoConstraints = false
@@ -542,14 +552,16 @@ final class SortSessionViewController: UIViewController {
             animated: didInitialContent
         )
 
-        // Control bar.
-        let bulkNoSelection = isBulk && selected.isEmpty
+        // Control bar. Skip / delete / favorite act on the current photo (or the
+        // bulk selection), so disable them when there's nothing to act on — e.g. the
+        // all-sorted done state, where the picker + Undo stay live.
+        let actionsDisabled = (isBulk && selected.isEmpty) || (!isBulk && !hasCurrent)
         if canUndo != lastCanUndo { lastCanUndo = canUndo; undoButton.isEnabled = canUndo }
-        if bulkNoSelection != lastBulkNoSelection {
-            lastBulkNoSelection = bulkNoSelection
-            deleteButton.isEnabled = !bulkNoSelection
-            skipButton.isEnabled = !bulkNoSelection
-            favoriteButton.isEnabled = !bulkNoSelection
+        if actionsDisabled != lastActionsDisabled {
+            lastActionsDisabled = actionsDisabled
+            deleteButton.isEnabled = !actionsDisabled
+            skipButton.isEnabled = !actionsDisabled
+            favoriteButton.isEnabled = !actionsDisabled
         }
         if favorite != lastFavorite {
             lastFavorite = favorite
@@ -591,14 +603,20 @@ final class SortSessionViewController: UIViewController {
     private func updateState(isLoading: Bool, queueEmpty: Bool, hasCurrent: Bool, isBulk: Bool) {
         if isLoading {
             showMessage(symbol: nil, title: "Scanning library…", body: nil, spinner: true)
-        } else if queueEmpty {
-            showMessage(symbol: "checkmark.seal.fill", title: "All Sorted!",
-                        body: "Every photo in this context belongs to at least one destination album.", spinner: false)
+            setCompletion(false)
+        } else if queueEmpty && !isBulk {
+            // Keep the album picker + control bar on screen; celebrate the finish in
+            // the media region where the carousel was.
+            setContentHidden(false)
+            messageView.isHidden = true
+            setCompletion(true)
         } else if hasCurrent || isBulk {
             setContentHidden(false)
             messageView.isHidden = true
+            setCompletion(false)
         } else {
             showMessage(symbol: nil, title: nil, body: nil, spinner: true)
+            setCompletion(false)
         }
     }
 
@@ -642,6 +660,120 @@ final class SortSessionViewController: UIViewController {
             l.textAlignment = .center
             l.numberOfLines = 0
             messageView.addArrangedSubview(l)
+        }
+    }
+
+    // MARK: - Completion ("All Sorted") state
+
+    /// Builds the celebratory done view that lives inside the media region, so the
+    /// album picker + control bar stay on screen while it's shown.
+    private func buildCompletionView() {
+        completionView.isHidden = true
+        completionView.translatesAutoresizingMaskIntoConstraints = false
+        mediaRegion.addSubview(completionView)
+
+        completionCheckmark.image = UIImage(systemName: "checkmark.seal.fill")
+        completionCheckmark.tintColor = .systemGreen
+        completionCheckmark.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 52, weight: .semibold)
+        completionCheckmark.contentMode = .center
+        completionCheckmark.isAccessibilityElement = false
+
+        let title = UILabel()
+        title.text = "All Sorted!"
+        title.font = .preferredFont(forTextStyle: .title2).withWeight(.semibold)
+        title.adjustsFontForContentSizeCategory = true
+        title.textAlignment = .center
+
+        let subtitle = UILabel()
+        subtitle.text = "You've sorted every photo in this context."
+        subtitle.font = .preferredFont(forTextStyle: .subheadline)
+        subtitle.textColor = .secondaryLabel
+        subtitle.adjustsFontForContentSizeCategory = true
+        subtitle.numberOfLines = 0
+        subtitle.textAlignment = .center
+
+        var config = UIButton.Configuration.tinted()
+        config.title = "Select More Photos…"
+        config.image = UIImage(systemName: "photo.badge.plus")
+        config.imagePadding = 6
+        config.buttonSize = .small
+        completionMoreButton.configuration = config
+        completionMoreButton.isHidden = true
+        completionMoreButton.addAction(UIAction { [weak self] _ in self?.presentLimitedPicker() }, for: .touchUpInside)
+
+        let stack = UIStackView(arrangedSubviews: [completionCheckmark, title, subtitle, completionMoreButton])
+        stack.axis = .vertical
+        stack.alignment = .center
+        stack.spacing = 8
+        stack.setCustomSpacing(14, after: subtitle)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        // Group the checkmark + text so VoiceOver reads it as one element.
+        stack.isAccessibilityElement = false
+        completionView.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            completionView.topAnchor.constraint(equalTo: mediaRegion.topAnchor),
+            completionView.leadingAnchor.constraint(equalTo: mediaRegion.leadingAnchor),
+            completionView.trailingAnchor.constraint(equalTo: mediaRegion.trailingAnchor),
+            completionView.bottomAnchor.constraint(equalTo: mediaRegion.bottomAnchor),
+
+            stack.centerXAnchor.constraint(equalTo: completionView.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: completionView.centerYAnchor),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: completionView.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: completionView.trailingAnchor, constant: -24),
+        ])
+    }
+
+    /// Show / hide the in-region done state. When shown it springs + bounces in
+    /// (instant under Reduce Motion); the album picker and control bar stay put.
+    private func setCompletion(_ show: Bool) {
+        guard show != lastCompletionShown else { return }
+        lastCompletionShown = show
+
+        if show {
+            // Offer "Select More Photos" only to limited-access users, who reach the
+            // end because only a subset of their library is visible to the app.
+            completionMoreButton.isHidden = PhotoLibrary.shared.authorization != .limited
+            mediaRegion.bringSubviewToFront(completionView)
+            completionView.isHidden = false
+            completionView.accessibilityElementsHidden = false
+
+            if UIAccessibility.isReduceMotionEnabled {
+                completionView.alpha = 1
+                completionView.transform = .identity
+            } else {
+                completionView.alpha = 0
+                completionView.transform = CGAffineTransform(scaleX: 0.85, y: 0.85)
+                UIView.animate(withDuration: 0.5, delay: 0,
+                               usingSpringWithDamping: 0.66, initialSpringVelocity: 0.3,
+                               options: [.allowUserInteraction]) {
+                    self.completionView.alpha = 1
+                    self.completionView.transform = .identity
+                }
+                completionCheckmark.addSymbolEffect(.bounce, options: .nonRepeating)
+            }
+        } else {
+            completionView.accessibilityElementsHidden = true
+            if UIAccessibility.isReduceMotionEnabled {
+                completionView.isHidden = true
+                completionView.alpha = 1
+                completionView.transform = .identity
+            } else {
+                UIView.animate(withDuration: 0.2) {
+                    self.completionView.alpha = 0
+                } completion: { _ in
+                    self.completionView.isHidden = true
+                    self.completionView.transform = .identity
+                }
+            }
+        }
+    }
+
+    /// Present the system limited-library picker so a `.limited`-access user can add
+    /// more photos for the app to sort, then rebuild the queue with the new set.
+    private func presentLimitedPicker() {
+        PHPhotoLibrary.shared().presentLimitedLibraryPicker(from: self) { [weak self] _ in
+            Task { @MainActor in await self?.vm.rebuildQueue() }
         }
     }
 
@@ -971,7 +1103,16 @@ final class SortSessionViewController: UIViewController {
         let skippedAction = UIAction(title: skippedCount > 0 ? "Skipped (\(skippedCount))" : "Skipped",
                                      image: UIImage(systemName: "checkmark.circle")) { [weak self] _ in self?.onShowSkipped() }
         skippedAction.attributes = skippedCount == 0 ? [.disabled] : []
-        let moreMenu = UIMenu(children: [trashAction, skippedAction])
+        var moreChildren: [UIMenuElement] = [trashAction, skippedAction]
+        // Limited-access users only expose a subset of their library to the app;
+        // give them a way to add more photos to sort.
+        if PhotoLibrary.shared.authorization == .limited {
+            let selectMore = UIAction(title: "Select More Photos…", image: UIImage(systemName: "photo.badge.plus")) { [weak self] _ in
+                self?.presentLimitedPicker()
+            }
+            moreChildren.append(selectMore)
+        }
+        let moreMenu = UIMenu(children: moreChildren)
         let moreItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: moreMenu)
         moreItem.accessibilityLabel = "Trash and skipped photos"
         leading.append(moreItem)
