@@ -86,6 +86,19 @@ final class SortSessionViewController: UIViewController {
     private var mediaHeightConstraint: NSLayoutConstraint!
     private var morphTopConstraint: NSLayoutConstraint!
     private var carouselBottomConstraint: NSLayoutConstraint!
+    private var grabberHeightConstraint: NSLayoutConstraint!
+
+    // Adaptive layout: a single vertical column (compact width) vs a two-pane
+    // side-by-side layout (regular width — iPad full screen / large multitasking
+    // windows). The photo column (carousel + strip + grabber) sits on the left and
+    // the album grid on the right; the floating glass toolbar spans the bottom in
+    // both. `leftColumnGuide`'s trailing edge is the column divider.
+    private let leftColumnGuide = UILayoutGuide()
+    private var compactConstraints: [NSLayoutConstraint] = []
+    private var regularConstraints: [NSLayoutConstraint] = []
+    private var isRegularLayout = false
+    /// Fraction of the width the photo column gets in the two-pane layout.
+    private let regularLeftFraction: CGFloat = 0.55
 
     // Resize state
     private var photoHeight: CGFloat = 300
@@ -181,6 +194,12 @@ final class SortSessionViewController: UIViewController {
         configureGrabber()
         updateNavBar()
         observeVM()
+
+        // Swap between the single-column and two-pane layouts when the window
+        // crosses the horizontal size-class boundary (iPad resize / rotation).
+        registerForTraitChanges([UITraitHorizontalSizeClass.self]) { (self: SortSessionViewController, _) in
+            self.applyAdaptiveLayout()
+        }
     }
 
     override func viewDidLayoutSubviews() {
@@ -188,6 +207,9 @@ final class SortSessionViewController: UIViewController {
         morph.targetSize = thumbTargetSize
         carousel.updateLayoutMetrics()
         applyInsets()
+        // Keep the photo region within the space the window actually has — a short
+        // or resized window must never starve the album grid / control bar.
+        clampMediaHeight()
     }
 
     override func viewSafeAreaInsetsDidChange() {
@@ -307,14 +329,19 @@ final class SortSessionViewController: UIViewController {
         view.addSubview(messageView)
 
         let safe = view.safeAreaLayoutGuide
+        view.addLayoutGuide(leftColumnGuide)
         mediaHeightConstraint = mediaRegion.heightAnchor.constraint(equalToConstant: photoHeight)
         morphTopConstraint = morph.collectionView.topAnchor.constraint(equalTo: mediaRegion.topAnchor)
         carouselBottomConstraint = carousel.collectionView.bottomAnchor.constraint(equalTo: mediaRegion.bottomAnchor, constant: -MorphController.stripBandHeight)
+        grabberHeightConstraint = resizeGrabber.heightAnchor.constraint(equalToConstant: 20)
 
+        // Constraints shared by both layouts. The per-layout pieces (the trailing
+        // edges of the photo column and the album grid's top/leading) live in
+        // `compactConstraints` / `regularConstraints` and are swapped on a size-class
+        // change by `applyAdaptiveLayout()`.
         NSLayoutConstraint.activate([
             headerContainer.topAnchor.constraint(equalTo: safe.topAnchor),
             headerContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            headerContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             headerContainer.heightAnchor.constraint(equalToConstant: 22),
 
             progressLabel.leadingAnchor.constraint(equalTo: headerContainer.leadingAnchor, constant: 16),
@@ -324,7 +351,6 @@ final class SortSessionViewController: UIViewController {
 
             mediaRegion.topAnchor.constraint(equalTo: headerContainer.bottomAnchor, constant: 4),
             mediaRegion.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            mediaRegion.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             mediaHeightConstraint,
 
             morphTopConstraint,
@@ -347,21 +373,19 @@ final class SortSessionViewController: UIViewController {
 
             resizeGrabber.topAnchor.constraint(equalTo: mediaRegion.bottomAnchor),
             resizeGrabber.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            resizeGrabber.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            resizeGrabber.heightAnchor.constraint(equalToConstant: 20),
+            grabberHeightConstraint,
             grabBar.centerXAnchor.constraint(equalTo: resizeGrabber.centerXAnchor),
             grabBar.centerYAnchor.constraint(equalTo: resizeGrabber.centerYAnchor),
             grabBar.widthAnchor.constraint(equalToConstant: 36),
             grabBar.heightAnchor.constraint(equalToConstant: 5),
 
-            // Album grid fills from the grabber down to the bottom; the glass
-            // toolbar floats over it and the grid scrolls clear via bottom inset.
-            album.collectionView.topAnchor.constraint(equalTo: resizeGrabber.bottomAnchor, constant: 6),
-            album.collectionView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            // Album grid bottom + trailing are shared; its top + leading vary by layout.
             album.collectionView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             album.collectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-            // Floating Liquid Glass toolbar pinned to the bottom safe area.
+            // Floating Liquid Glass toolbar pinned to the bottom safe area, full width
+            // in both layouts (it spans under the album column too; the grid insets
+            // its content to clear it).
             controlBarContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
             controlBarContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             controlBarContainer.bottomAnchor.constraint(equalTo: safe.bottomAnchor, constant: -8),
@@ -380,7 +404,58 @@ final class SortSessionViewController: UIViewController {
             messageView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
             messageView.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 32),
             messageView.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -32),
+
+            // The left-column divider: its trailing edge splits the two panes.
+            leftColumnGuide.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            leftColumnGuide.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: regularLeftFraction),
         ])
+
+        // Compact (single column): photo column is full width; the album grid sits
+        // below the grabber and runs to the bottom.
+        compactConstraints = [
+            headerContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            mediaRegion.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            resizeGrabber.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            album.collectionView.topAnchor.constraint(equalTo: resizeGrabber.bottomAnchor, constant: 6),
+            album.collectionView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+        ]
+
+        // Regular (two pane): photo column is the left pane; the album grid is the
+        // right pane, spanning the full height from the safe-area top.
+        regularConstraints = [
+            headerContainer.trailingAnchor.constraint(equalTo: leftColumnGuide.trailingAnchor),
+            mediaRegion.trailingAnchor.constraint(equalTo: leftColumnGuide.trailingAnchor),
+            resizeGrabber.trailingAnchor.constraint(equalTo: leftColumnGuide.trailingAnchor),
+            album.collectionView.topAnchor.constraint(equalTo: safe.topAnchor),
+            album.collectionView.leadingAnchor.constraint(equalTo: leftColumnGuide.trailingAnchor),
+        ]
+
+        applyAdaptiveLayout()
+    }
+
+    // MARK: - Adaptive layout (single column vs two pane)
+
+    /// Activate the constraint set for the current horizontal size class and
+    /// configure the grabber (only meaningful in the single-column layout, where it
+    /// trades photo height for album-grid height; in two pane the photo fills the
+    /// column so the grabber is collapsed away).
+    private func applyAdaptiveLayout() {
+        let regular = traitCollection.horizontalSizeClass == .regular
+        isRegularLayout = regular
+        if regular {
+            NSLayoutConstraint.deactivate(compactConstraints)
+            NSLayoutConstraint.activate(regularConstraints)
+        } else {
+            NSLayoutConstraint.deactivate(regularConstraints)
+            NSLayoutConstraint.activate(compactConstraints)
+        }
+        grabberHeightConstraint.constant = regular ? 0 : 20
+        resizeGrabber.isHidden = regular
+        // A size-class flip can land mid hero-flight (entering/exiting bulk); make
+        // sure the carousel is never left with its foreground suppressed (blank).
+        heroForegroundSuppressed = false
+        carousel.suppressForeground = false
+        clampMediaHeight()
     }
 
     private func wireRegions() {
@@ -537,7 +612,7 @@ final class SortSessionViewController: UIViewController {
         case .changed:
             guard let start = dragStartHeight else { return }
             let raw = start + translation
-            let clamped = min(maxPhotoHeight, max(minPhotoHeight, raw))
+            let clamped = min(maxMediaHeight(), max(minPhotoHeight, raw))
             let inNotch = notchEnabled && abs(clamped - defaultPhotoHeight) <= notchRadius
             let target = inNotch ? defaultPhotoHeight + (clamped - defaultPhotoHeight) * notchDamping : clamped
             if !inNotch, wasInNotch {
@@ -550,7 +625,7 @@ final class SortSessionViewController: UIViewController {
         case .ended, .cancelled, .failed:
             guard let start = dragStartHeight else { return }
             let raw = start + translation
-            let clamped = min(maxPhotoHeight, max(minPhotoHeight, raw))
+            let clamped = min(maxMediaHeight(), max(minPhotoHeight, raw))
             if notchEnabled, abs(clamped - defaultPhotoHeight) <= notchRadius {
                 setPhotoHeight(defaultPhotoHeight, springy: true, release: true)
             }
@@ -575,6 +650,44 @@ final class SortSessionViewController: UIViewController {
                            options: [.allowUserInteraction, .beginFromCurrentState]) {
                 self.view.layoutIfNeeded()
             }
+        }
+    }
+
+    // MARK: - Media height clamping
+
+    /// The Y of the floating toolbar's top — the lower bound the photo region (and,
+    /// in single column, the album grid below it) must stay above. Falls back to an
+    /// estimate before the toolbar has been laid out.
+    private func toolbarTopY() -> CGFloat {
+        controlBarContainer.frame.height > 0
+            ? controlBarContainer.frame.minY
+            : view.bounds.maxY - view.safeAreaInsets.bottom - 8 - 52
+    }
+
+    /// The largest media-region height the current window can give the photo without
+    /// starving what shares its column. In two pane the album grid is in the other
+    /// column, so the photo fills the left column; in single column it must leave a
+    /// usable minimum for the album grid stacked beneath it.
+    private func maxMediaHeight() -> CGFloat {
+        let mediaTop = view.safeAreaInsets.top + 22 + 4   // header height + gap
+        let bottomLimit = toolbarTopY() - 6
+        if isRegularLayout {
+            return max(minPhotoHeight, bottomLimit - mediaTop)
+        }
+        let grabberAndGap: CGFloat = 20 + 6
+        let minAlbumVisible: CGFloat = 200
+        let maxH = bottomLimit - mediaTop - grabberAndGap - minAlbumVisible
+        return max(minPhotoHeight, min(maxPhotoHeight, maxH))
+    }
+
+    /// Pin the media region to the clamped height: it fills the column in two pane,
+    /// and tracks the user's grabber preference (capped to fit) in single column.
+    private func clampMediaHeight() {
+        guard view.bounds.height > 0 else { return }   // wait for real geometry
+        let maxH = maxMediaHeight()
+        let target = isRegularLayout ? maxH : min(photoHeight, maxH)
+        if abs(mediaHeightConstraint.constant - target) > 0.5 {
+            mediaHeightConstraint.constant = target
         }
     }
 
@@ -751,9 +864,12 @@ final class SortSessionViewController: UIViewController {
     }
 
     private func setContentHidden(_ hidden: Bool) {
-        for v in [headerContainer, mediaRegion, resizeGrabber, controlBarContainer, album.collectionView] {
-            v.isHidden = hidden
-        }
+        headerContainer.isHidden = hidden
+        mediaRegion.isHidden = hidden
+        controlBarContainer.isHidden = hidden
+        album.collectionView.isHidden = hidden
+        // The grabber stays collapsed in the two-pane layout regardless of content.
+        resizeGrabber.isHidden = hidden || isRegularLayout
     }
 
     /// Full-screen loading takeover (spinner + optional title). The all-sorted
