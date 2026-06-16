@@ -34,6 +34,7 @@ final class SortSessionViewController: UIViewController {
     var onEditContext: () -> Void = {}
     var onViewAlbum: (String, String) -> Void = { _, _ in }
     var onDebugClear: (() -> Void)?
+    var onDebugShowOnboarding: (() -> Void)?
 
     // Regions
     private let carousel = PhotoCarouselController()
@@ -1051,7 +1052,7 @@ final class SortSessionViewController: UIViewController {
     private func updateNavBar() {
         navigationItem.title = navTitleText
 
-        // Leading: context list, more (trash/skipped), debug.
+        // Leading: context list, more (trash / skipped / debug).
         var leading: [UIBarButtonItem] = []
         let contextsItem = UIBarButtonItem(image: UIImage(systemName: "list.bullet"), primaryAction: UIAction { [weak self] _ in self?.onShowContextList() })
         contextsItem.accessibilityLabel = "Contexts"
@@ -1063,19 +1064,26 @@ final class SortSessionViewController: UIViewController {
         let skippedAction = UIAction(title: skippedCount > 0 ? "Skipped (\(skippedCount))" : "Skipped",
                                      image: UIImage(systemName: "checkmark.circle")) { [weak self] _ in self?.onShowSkipped() }
         skippedAction.attributes = skippedCount == 0 ? [.disabled] : []
-        let moreMenu = UIMenu(children: [trashAction, skippedAction])
+
+        var moreChildren: [UIMenuElement] = [trashAction, skippedAction]
+        // Debug tools (DEBUG + simulator only — the closures are nil otherwise) live
+        // inline at the bottom of the More menu rather than in a separate bar button.
+        var debugActions: [UIAction] = []
+        if let onDebugShowOnboarding {
+            debugActions.append(UIAction(title: "Show Onboarding", image: UIImage(systemName: "sparkles")) { _ in onDebugShowOnboarding() })
+        }
+        if let onDebugClear {
+            debugActions.append(UIAction(title: "Remove All Photos from Albums", image: UIImage(systemName: "xmark.bin"), attributes: .destructive) { _ in onDebugClear() })
+        }
+        if !debugActions.isEmpty {
+            moreChildren.append(UIMenu(title: "Debug", image: UIImage(systemName: "ladybug"),
+                                       options: .displayInline, children: debugActions))
+        }
+        let moreMenu = UIMenu(children: moreChildren)
         let moreItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: moreMenu)
-        moreItem.accessibilityLabel = "Trash and skipped photos"
+        moreItem.accessibilityLabel = "More"
         leading.append(moreItem)
 
-        if let onDebugClear {
-            let debug = UIAction(title: "Remove All Photos from Albums", image: UIImage(systemName: "xmark.bin"), attributes: .destructive) { _ in onDebugClear() }
-            let debugMenu = UIMenu(children: [debug])
-            let item = UIBarButtonItem(image: UIImage(systemName: "ladybug"), menu: debugMenu)
-            item.tintColor = .systemOrange
-            item.accessibilityLabel = "Debug tools"
-            leading.append(item)
-        }
         navigationItem.leftBarButtonItems = leading
 
         // Trailing: bulk toggle, edit context.

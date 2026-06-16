@@ -23,9 +23,11 @@ struct SortSessionView: View {
     var onShowTrash: () -> Void = {}
     var onShowSkipped: () -> Void = {}
     var onDebugClear: (() -> Void)?
+    var onDebugShowOnboarding: (() -> Void)?
 
     @Environment(\.modelContext) private var modelContext
     @Environment(PhotoLibrary.self) private var library
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // Trash count for the nav-bar "More" menu. Held here (not in RootView) so the
     // @Query churn stays scoped to this lightweight host.
@@ -35,6 +37,15 @@ struct SortSessionView: View {
     @State private var hasAppeared = false
     @State private var showingContextEditor = false
     @State private var viewingAlbum: AlbumSheetItem?
+
+    /// One-time coach tip on the first sort, pointing at the album grid. The
+    /// persisted flag gates whether it's ever shown again; `coachTipDismissed` is
+    /// local state that drives the *exit* animation — mutating `@AppStorage` inside
+    /// `withAnimation` doesn't animate (UserDefaults publishes outside the
+    /// transaction), so the dismissal is animated via this and `hasSeenSortTip` is
+    /// persisted only after the exit has played.
+    @AppStorage("hasSeenSortTip") private var hasSeenSortTip = false
+    @State private var coachTipDismissed = false
 
     var body: some View {
         Group {
@@ -48,12 +59,36 @@ struct SortSessionView: View {
                     onShowSkipped: onShowSkipped,
                     onEditContext: { showingContextEditor = true },
                     onViewAlbum: { id, title in viewingAlbum = AlbumSheetItem(id: id, title: title) },
-                    onDebugClear: onDebugClear
+                    onDebugClear: onDebugClear,
+                    onDebugShowOnboarding: onDebugShowOnboarding
                 )
                 .ignoresSafeArea()
             } else {
                 ProgressView("Loading…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if vm != nil, !hasSeenSortTip, !coachTipDismissed {
+                SortCoachTip { dismissCoachTip() }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 28)
+                    // Insertion is instant (.identity) so the tip is always visible
+                    // even when it's added after the first render without animation.
+                    // The exit is the animated part — driven inside withAnimation via
+                    // coachTipDismissed, so the removal transition reliably plays.
+                    .transition(
+                        reduceMotion
+                        ? .asymmetric(insertion: .identity, removal: .opacity)
+                        : .asymmetric(
+                            insertion: .identity,
+                            // Shrink toward the album grid and drop away with a little
+                            // spring overshoot, rather than blinking out.
+                            removal: .scale(scale: 0.84, anchor: .bottom)
+                                .combined(with: .move(edge: .bottom))
+                                .combined(with: .opacity)
+                        )
+                    )
             }
         }
         // RootView's NavigationStack bar is hidden for this screen; the UIKit
@@ -85,6 +120,18 @@ struct SortSessionView: View {
         }
         .onDisappear { ImageLoader.shared.reset() }
     }
+
+    /// Animate the coach tip away via local @State (so the exit transition plays),
+    /// then persist `hasSeenSortTip` once it's offscreen — persisting immediately
+    /// would flip the derived show-condition and yank the view out without animating.
+    private func dismissCoachTip() {
+        withAnimation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.6)) {
+            coachTipDismissed = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            hasSeenSortTip = true
+        }
+    }
 }
 
 // MARK: - UIKit host
@@ -102,6 +149,7 @@ private struct SortSessionRepresentable: UIViewControllerRepresentable {
     var onEditContext: () -> Void
     var onViewAlbum: (String, String) -> Void
     var onDebugClear: (() -> Void)?
+    var onDebugShowOnboarding: (() -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -128,6 +176,7 @@ private struct SortSessionRepresentable: UIViewControllerRepresentable {
         vc.onEditContext = onEditContext
         vc.onViewAlbum = onViewAlbum
         vc.onDebugClear = onDebugClear
+        vc.onDebugShowOnboarding = onDebugShowOnboarding
     }
 
     final class Coordinator {

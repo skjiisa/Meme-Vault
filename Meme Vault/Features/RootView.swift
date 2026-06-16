@@ -29,6 +29,8 @@ struct RootView: View {
 
     @AppStorage("startupContextUUID") private var startupContextUUID = ""
     @AppStorage("lastUsedContextUUID") private var lastUsedContextUUID = ""
+    @AppStorage("hasOnboarded") private var hasOnboarded = false
+    @AppStorage("hasSeenSortTip") private var hasSeenSortTip = false
 
     private var fallbackContext: OrgContext? {
         contexts.first { $0.isDefault } ?? contexts.first
@@ -56,6 +58,20 @@ struct RootView: View {
         return nil
     }
 
+    /// Debug "replay onboarding" action — resets the first-run flags so the intro
+    /// (and first-sort tip) show again. Simulator + DEBUG only.
+    private var debugShowOnboardingAction: (() -> Void)? {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["SIMULATOR_DEVICE_NAME"] != nil {
+            return {
+                hasSeenSortTip = false
+                hasOnboarded = false
+            }
+        }
+        #endif
+        return nil
+    }
+
     /// The context currently on screen: explicit selection, or the primary default.
     private var displayedContext: OrgContext? {
         if let selected = selectedContext,
@@ -68,7 +84,14 @@ struct RootView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if !library.isAuthorized {
+                if !hasOnboarded {
+                    OnboardingView(onFinished: {
+                        hasOnboarded = true
+                        ensureDefaultContext()
+                    })
+                    // Full takeover — hide the SwiftUI nav bar behind the intro.
+                    .toolbar(.hidden, for: .navigationBar)
+                } else if !library.isAuthorized {
                     AuthorizationGateView()
                 } else if let ctx = displayedContext {
                     SortSessionView(
@@ -76,7 +99,8 @@ struct RootView: View {
                         onShowContextList: { showingContextList = true },
                         onShowTrash: { photoMode = .trash },
                         onShowSkipped: { photoMode = .skipped(ctx) },
-                        onDebugClear: debugClearAction
+                        onDebugClear: debugClearAction,
+                        onDebugShowOnboarding: debugShowOnboardingAction
                     )
                     .id("\(ctx.uuid.uuidString)-\(sessionResetTick)")
                 } else {
@@ -91,23 +115,7 @@ struct RootView: View {
                     onShowContextList: { showingContextList = true },
                     onSelectMode: { photoMode = $0 }
                 )
-                
-                #if DEBUG
-                ToolbarItem(placement: .topBarLeading) {
-                    if isSimulator {
-                        Menu {
-                            Button(role: .destructive) {
-                                showingDebugConfirm = true
-                            } label: {
-                                Label("Remove All Photos from Albums", systemImage: "xmark.bin")
-                            }
-                        } label: {
-                            Image(systemName: "ladybug")
-                                .foregroundStyle(.orange)
-                        }
-                    }
-                }
-                #endif
+                // Debug tools now live in the sort screen's UIKit "More" (…) menu.
             }
             .sheet(isPresented: $showingContextList, onDismiss: {
                 if let pending = pendingContext {
@@ -145,7 +153,11 @@ struct RootView: View {
             }
         }
         .task {
-            await library.requestAuthorization()
+            // First run requests access from the onboarding flow instead, so the
+            // system prompt lands with context rather than cold on launch.
+            if hasOnboarded {
+                await library.requestAuthorization()
+            }
             ensureDefaultContext()
         }
         .onChange(of: displayedContext?.uuid, initial: true) { _, newUUID in
@@ -184,10 +196,6 @@ struct RootView: View {
     // MARK: - Debug
 
     #if DEBUG
-    private var isSimulator: Bool {
-        ProcessInfo.processInfo.environment["SIMULATOR_DEVICE_NAME"] != nil
-    }
-
     private func debugClearAlbums() async {
         do {
             try await AlbumService.debugRemoveAllAssetsFromAllAlbums()
