@@ -16,6 +16,7 @@
 import UIKit
 import Photos
 import AVFoundation
+import AVKit
 import CoreImage.CIFilterBuiltins
 
 final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetching, UICollectionViewDelegate {
@@ -68,6 +69,11 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
     /// loading) for the hero flights.
     var onActiveImage: (String, UIImage?) -> Void = { _, _ in }
 
+    /// Host VC that video cells embed their `AVPlayerViewController` into (as a child
+    /// VC, so native transport controls behave correctly). Set by the owning
+    /// `SortSessionViewController`.
+    weak var hostViewController: UIViewController?
+
     /// Last page reported to the strip live during a drag, so we only fire on a
     /// genuine page change.
     private var liveID: String?
@@ -98,6 +104,7 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
         let registration = UICollectionView.CellRegistration<PhotoPageCell, String> { [weak self] cell, _, id in
             guard let self else { return }
             cell.delegate = self
+            cell.hostViewController = self.hostViewController
             cell.configure(
                 assetID: id,
                 targetSize: self.pixelTargetSize,
@@ -334,6 +341,13 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
         // The display-window prefetch is driven by setCacheWindow; nothing extra.
     }
 
+    /// A cell left the screen — scrolled away, or its item was sorted/removed. Stop
+    /// its playback now: an `AVPlayer` keeps playing audio even with no visible view,
+    /// so without this a sorted video's sound lingers from an orphaned player.
+    func collectionView(_ cv: UICollectionView, didEndDisplaying cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
+        (cell as? PhotoPageCell)?.endDisplaying()
+    }
+
     // MARK: - Paging snap
 
     /// Snap to the nearest page, reproducing `.scrollTargetBehavior(.viewAligned)`.
@@ -419,7 +433,10 @@ final class PhotoPageCell: UICollectionViewCell {
     private let missingIcon = UIImageView()
     private let missingLabel = UILabel()
     private let missingRetryButton = UIButton(type: .system)
-    private var playerLayer: AVPlayerLayer?
+    private var playerVC: AVPlayerViewController?
+    /// Host VC the `AVPlayerViewController` is added to as a child (set from the
+    /// controller). Lets the native video controls behave correctly.
+    weak var hostViewController: UIViewController?
 
     private enum MediaKind { case image, gif, video }
     private enum Phase { case loading, loaded, missing }
@@ -534,11 +551,6 @@ final class PhotoPageCell: UICollectionViewCell {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        playerLayer?.frame = card.bounds
-    }
-
     // MARK: Configure
 
     func configure(assetID: String, targetSize: CGSize, isActive: Bool, isForeground: Bool, suppressForeground: Bool, isDeparted: Bool) {
@@ -597,7 +609,7 @@ final class PhotoPageCell: UICollectionViewCell {
         // the photo. Hidden outright when departed (the album flight draws it).
         let hideForeground = (suppressForeground && isActive) || isDeparted
         foregroundImageView.alpha = hideForeground ? 0 : 1
-        playerLayer?.opacity = hideForeground ? 0 : 1
+        playerVC?.view.alpha = hideForeground ? 0 : 1
 
         // Fade card + backdrop when the photo departs on a flight, so no remnant
         // lingers where the photo was.
@@ -741,6 +753,8 @@ final class PhotoPageCell: UICollectionViewCell {
         let p = AVPlayer(playerItem: item)
         p.actionAtItemEnd = .none
         p.isMuted = true
+        // The user unmutes via the native control's speaker button; switch the audio
+        // session to .playback then so sound comes through even with the ringer off.
         muteObservation = p.observe(\.isMuted, options: [.new]) { player, _ in
             guard !player.isMuted else { return }
             Self.activatePlaybackAudioSession()
@@ -751,11 +765,31 @@ final class PhotoPageCell: UICollectionViewCell {
             p?.seek(to: .zero)
             p?.play()
         }
-        let pl = AVPlayerLayer(player: p)
-        pl.videoGravity = .resizeAspect
-        pl.frame = card.bounds
-        card.layer.insertSublayer(pl, above: foregroundImageView.layer)
-        playerLayer = pl
+
+        // An AVPlayerViewController (not a bare AVPlayerLayer) so the video has native
+        // transport controls on tap and a mute toggle, and — being an Auto Layout
+        // view pinned to the card — resizes in lockstep with the grabber drag rather
+        // than lagging behind on its own implicit animation.
+        let vc = AVPlayerViewController()
+        vc.player = p
+        vc.showsPlaybackControls = true
+        vc.videoGravity = .resizeAspect
+        vc.allowsPictureInPicturePlayback = false
+        vc.updatesNowPlayingInfoCenter = false
+        vc.view.backgroundColor = .clear
+        vc.view.translatesAutoresizingMaskIntoConstraints = false
+
+        hostViewController?.addChild(vc)
+        card.addSubview(vc.view)
+        NSLayoutConstraint.activate([
+            vc.view.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            vc.view.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            vc.view.topAnchor.constraint(equalTo: card.topAnchor),
+            vc.view.bottomAnchor.constraint(equalTo: card.bottomAnchor),
+        ])
+        if hostViewController != nil { vc.didMove(toParent: hostViewController) }
+
+        playerVC = vc
         player = p
         applyVisibility()
         p.play()
@@ -768,8 +802,24 @@ final class PhotoPageCell: UICollectionViewCell {
         muteObservation?.invalidate()
         muteObservation = nil
         player = nil
-        playerLayer?.removeFromSuperlayer()
-        playerLayer = nil
+        if let vc = playerVC {
+            vc.willMove(toParent: nil)
+            vc.view.removeFromSuperview()
+            vc.removeFromParent()
+        }
+        playerVC = nil
+    }
+
+    /// Stop all playback because the cell has left the screen (without resetting the
+    /// loaded still — it stays bound for a quick re-display). Called from the
+    /// controller's `didEndDisplaying`, so a removed/scrolled-away video's audio
+    /// can't keep playing from an orphaned player. If the cell becomes active again,
+    /// `syncPlayback` rebuilds the player.
+    func endDisplaying() {
+        playbackTask?.cancel()
+        playbackTask = nil
+        teardownPlayer()
+        if kind == .gif { foregroundImageView.stopAnimating() }
     }
 
     override func prepareForReuse() {
@@ -826,9 +876,16 @@ final class PhotoPageCell: UICollectionViewCell {
         return UIImage(cgImage: cg)
     }
 
+    /// Serial queue for audio-session configuration. `setCategory`/`setActive` are
+    /// synchronous and can block, so they must run off the main thread (UIKit warns
+    /// otherwise); serialising keeps overlapping unmute events from racing.
+    private static let audioSessionQueue = DispatchQueue(label: "com.memevault.audioSession")
+
     private static func activatePlaybackAudioSession() {
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .moviePlayback)
-        try? session.setActive(true)
+        audioSessionQueue.async {
+            let session = AVAudioSession.sharedInstance()
+            try? session.setCategory(.playback, mode: .moviePlayback)
+            try? session.setActive(true)
+        }
     }
 }
