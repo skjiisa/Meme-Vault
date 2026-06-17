@@ -501,6 +501,7 @@ final class SortSessionViewController: UIViewController {
     }
 
     private func wireRegions() {
+        carousel.hostViewController = self
         carousel.onShowAsset = { [weak self] id in self?.vm.showAsset(id: id) }
         // Mid-drag the carousel only nudges the strip's selection — no VM commit —
         // so the album grid / current photo stay put and the drag isn't interrupted.
