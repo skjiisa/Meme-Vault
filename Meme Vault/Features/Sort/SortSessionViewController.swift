@@ -16,6 +16,7 @@
 //
 
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
 import Photos
 import Observation
 
@@ -107,15 +108,23 @@ final class SortSessionViewController: UIViewController {
     private let columnGrabber = UIView()
     private var dragStartLeftWidth: CGFloat?
 
-    // Resize state
+    // Resize state. Hero height (the media region) ranges over [minPhotoHeight,
+    // maxPhotoHeight], minus `MorphController.stripBandHeight` (44) of preview strip —
+    // so the photo itself spans ~96pt…~516pt. Detail viewing is handled by pinch-zoom,
+    // so this grabber is about layout balance (photo vs album grid), not inspection.
     private var photoHeight: CGFloat = 300
     private var dragStartHeight: CGFloat?
     private var wasInNotch = false
-    private let minPhotoHeight: CGFloat = 120
-    private let maxPhotoHeight: CGFloat = 500
-    private let defaultPhotoHeight: CGFloat = 300
+    private let minPhotoHeight: CGFloat = 160
+    private let maxPhotoHeight: CGFloat = 560
+    private let defaultPhotoHeight: CGFloat = 320
     private let notchRadius: CGFloat = 30
     private let notchDamping: CGFloat = 0.25
+    /// Album grid kept on screen (single-column layout) when the hero is dragged to its
+    /// tallest, so growing the photo never fully hides the destinations. On most iPhones
+    /// this — not `maxPhotoHeight` — is what caps the hero height; the ceiling only binds
+    /// on large screens / iPad.
+    private let minAlbumVisible: CGFloat = 140
 
     // Column count for the album grid.
     private var columnCount = 3
@@ -133,6 +142,23 @@ final class SortSessionViewController: UIViewController {
     private var preloadedHeroID: String?
     private var preloadedHeroImage: UIImage?
     private var heroForegroundSuppressed = false
+
+    // Pinch-to-zoom on the hero: a floating copy lifted into `albumFlightOverlay`
+    // (above the grid + toolbar, non-clipping) so it can grow over the rest of the
+    // screen, plus a scrim that darkens behind it. The carousel keeps the page's
+    // blurred backdrop as a placeholder while the sharp copy is lifted.
+    private var heroZoomView: UIImageView?
+    private var heroZoomScrim: UIView?
+    /// Holds the lifted copy; during the snap-back it's translated to track carousel
+    /// scrolling so the copy rides its page home instead of springing to a stale center.
+    private var heroZoomContainer: UIView?
+    private var heroZoomStartCenter: CGPoint = .zero
+    /// Carousel content offset captured when the snap-back begins, so scroll since then
+    /// drives the container's translation.
+    private var heroZoomDismissStartOffsetX: CGFloat = 0
+    /// True while the lifted copy is springing back, so a re-pinch over the snap-back
+    /// is ignored rather than fighting (and being torn down by) the in-flight animation.
+    private var heroZoomDismissing = false
 
     // Hero image kept at sort time, keyed by photo ID, so an undo can start the
     // reverse flight immediately (overlapping the carousel slide) instead of
@@ -193,7 +219,7 @@ final class SortSessionViewController: UIViewController {
         morph.gridColumns = photoColumnCount
         morph.gridBottomInset = photoZoomBarClearance
         if let stored = UserDefaults.standard.object(forKey: photoHeightKey) as? Double {
-            photoHeight = CGFloat(stored)
+            photoHeight = min(maxPhotoHeight, max(minPhotoHeight, CGFloat(stored)))
         }
         if let storedFraction = UserDefaults.standard.object(forKey: splitFractionKey) as? Double {
             regularLeftFraction = min(0.7, max(0.3, CGFloat(storedFraction)))
@@ -205,6 +231,7 @@ final class SortSessionViewController: UIViewController {
         configurePhotoZoomBar()
         configureGrabber()
         configureColumnGrabber()
+        configureHeroPinch()
         updateNavBar()
         observeVM()
 
@@ -492,6 +519,11 @@ final class SortSessionViewController: UIViewController {
         grabberHeightConstraint.constant = regular ? 0 : 20
         resizeGrabber.isHidden = regular
         columnGrabber.isHidden = !regular
+        // The carousel is full width in single column, so its own clip is redundant
+        // (off-screen peeks are window-clipped) and would catch the hero card's rounded
+        // top corners during the resize spring — let it not clip there. Two pane keeps
+        // clipping so peeks don't bleed past the column divider into the album grid.
+        carousel.collectionView.clipsToBounds = regular
         // A size-class flip can land mid hero-flight (entering/exiting bulk); make
         // sure the carousel is never left with its foreground suppressed (blank).
         heroForegroundSuppressed = false
@@ -502,6 +534,9 @@ final class SortSessionViewController: UIViewController {
 
     private func wireRegions() {
         carousel.hostViewController = self
+        // Decode hero stills for the tallest the region can get, so a small-preview swipe
+        // doesn't cache low-res frames that blur when the hero is later dragged bigger.
+        carousel.maxPageHeight = maxPhotoHeight - MorphController.stripBandHeight
         carousel.onShowAsset = { [weak self] id in self?.vm.showAsset(id: id) }
         // Mid-drag the carousel only nudges the strip's selection — no VM commit —
         // so the album grid / current photo stay put and the drag isn't interrupted.
@@ -510,6 +545,7 @@ final class SortSessionViewController: UIViewController {
             self?.heroImageID = id
             self?.heroImage = image
         }
+        carousel.onDidScroll = { [weak self] in self?.trackHeroZoomDismissalScroll() }
         morph.onTap = { [weak self] id in
             guard let self else { return }
             if self.vm.isBulkMode { self.vm.toggleBulkSelection(id) } else { self.vm.showAsset(id: id) }
@@ -757,6 +793,148 @@ final class SortSessionViewController: UIViewController {
         }
     }
 
+    // MARK: - Hero pinch-to-zoom
+
+    /// Pinch the centered hero photo to peek at it larger. The sharp image is lifted
+    /// out of the carousel's clipping card into the top-level flight overlay, so the
+    /// zoom can spill over the preview grid, album grid, and toolbar; it springs back
+    /// to its place on release. Lives on the carousel's collection view (browse only).
+    private func configureHeroPinch() {
+        let pinch = HeroZoomGestureRecognizer(target: self, action: #selector(handleHeroPinch(_:)))
+        pinch.delegate = self
+        carousel.collectionView.addGestureRecognizer(pinch)
+    }
+
+    @objc private func handleHeroPinch(_ gesture: HeroZoomGestureRecognizer) {
+        switch gesture.state {
+        case .began:   beginHeroZoom(gesture)
+        case .changed: updateHeroZoom(gesture)
+        case .ended, .cancelled, .failed: endHeroZoom()
+        default:       break
+        }
+    }
+
+    private func beginHeroZoom(_ gesture: HeroZoomGestureRecognizer) {
+        // Browse mode only, with the current page's full image decoded and on screen.
+        guard !vm.isBulkMode, view.window != nil, heroZoomView == nil,
+              let id = vm.currentAssetID, heroImageID == id, let image = heroImage,
+              let pageRect = carouselPageRect(in: albumFlightOverlay) else { return }
+        let startRect = Self.aspectFitRect(for: image.size, in: pageRect)
+        guard albumFlightOverlay.bounds.intersects(startRect) else { return }
+
+        // Stop the carousel scrolling so the pinch fully owns the gesture, and hide
+        // the page's sharp foreground (the lifted copy draws it) while keeping its
+        // blurred backdrop as a placeholder.
+        carousel.collectionView.isScrollEnabled = false
+        carousel.suppressForeground = true
+
+        let scrim = UIView(frame: albumFlightOverlay.bounds)
+        scrim.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        scrim.backgroundColor = .black
+        scrim.alpha = 0
+        scrim.isUserInteractionEnabled = false
+        albumFlightOverlay.addSubview(scrim)
+        heroZoomScrim = scrim
+
+        // The copy rides in a container matching the overlay (identity transform during
+        // the pinch, so the focal math below is unchanged). The snap-back springs the
+        // copy home *within* the container while the container translates with carousel
+        // scroll, landing the copy on its page's live position.
+        let container = UIView(frame: albumFlightOverlay.bounds)
+        container.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        container.isUserInteractionEnabled = false
+        albumFlightOverlay.addSubview(container)
+        heroZoomContainer = container
+
+        let zoom = UIImageView(image: image)
+        zoom.contentMode = .scaleAspectFit
+        zoom.frame = startRect
+        container.addSubview(zoom)
+        heroZoomView = zoom
+
+        heroZoomStartCenter = CGPoint(x: startRect.midX, y: startRect.midY)
+    }
+
+    private func updateHeroZoom(_ gesture: HeroZoomGestureRecognizer) {
+        guard let zoom = heroZoomView, !heroZoomDismissing else { return }
+        // Incremental zoom about the live focal point (the touch centroid), clamped so
+        // the peek only grows from the original size and never collapses. Applying the
+        // recognizer's per-event deltas (rather than absolutes) keeps the photo
+        // continuous as fingers land or lift.
+        let current = zoom.transform.a
+        let proposed = min(6, max(1, current * gesture.scale))
+        let step = current > 0 ? proposed / current : 1
+        if step != 1 {
+            let focus = gesture.centroid(in: albumFlightOverlay)
+            let center = zoom.center
+            zoom.center = CGPoint(x: focus.x + (center.x - focus.x) * step,
+                                  y: focus.y + (center.y - focus.y) * step)
+            zoom.transform = zoom.transform.scaledBy(x: step, y: step)
+        }
+        // Incremental pan — also moves the photo with the single remaining finger once
+        // the other lifts, instead of snapping back while a finger is still down.
+        let pan = gesture.translation
+        zoom.center = CGPoint(x: zoom.center.x + pan.x, y: zoom.center.y + pan.y)
+        heroZoomScrim?.alpha = min(0.6, max(0, zoom.transform.a - 1) * 0.5)
+    }
+
+    private func endHeroZoom() {
+        // A snap-back is already in flight — ignore a stray end from a gesture that
+        // began over it.
+        guard !heroZoomDismissing else { return }
+        carousel.collectionView.isScrollEnabled = true
+        guard let zoom = heroZoomView else {
+            // Nothing was lifted (begin guard failed) — make sure the page is restored.
+            carousel.suppressForeground = false
+            teardownHeroZoom()
+            return
+        }
+        heroZoomDismissing = true
+        // Reference offset for scroll tracking: any carousel scroll from here translates
+        // the container so the copy rides its page (see trackHeroZoomDismissalScroll).
+        heroZoomDismissStartOffsetX = carousel.collectionView.contentOffset.x
+        let scrim = heroZoomScrim
+        let restore = {
+            zoom.transform = .identity
+            zoom.center = self.heroZoomStartCenter
+            scrim?.alpha = 0
+        }
+        // Reveal the page's real foreground under the now-aligned copy, then drop it.
+        let finish = { [weak self] in
+            guard let self, self.heroZoomDismissing else { return }
+            self.carousel.suppressForeground = false
+            self.teardownHeroZoom()
+        }
+        if UIAccessibility.isReduceMotionEnabled {
+            UIView.animate(withDuration: 0.2, animations: restore) { _ in finish() }
+        } else {
+            UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.82,
+                           initialSpringVelocity: 0,
+                           options: [.allowUserInteraction, .beginFromCurrentState],
+                           animations: restore) { _ in finish() }
+        }
+    }
+
+    private func teardownHeroZoom() {
+        heroZoomView?.removeFromSuperview()
+        heroZoomView = nil
+        heroZoomContainer?.removeFromSuperview()
+        heroZoomContainer = nil
+        heroZoomScrim?.removeFromSuperview()
+        heroZoomScrim = nil
+        heroZoomDismissing = false
+    }
+
+    /// While the snap-back is in flight, translate the container by however far the
+    /// carousel has scrolled since it began, so the copy rides its page and lands on the
+    /// page's live position — the spring still shrinks it home, but the home target
+    /// moves with the scroll, so there's no settle-to-center then jump and no fade.
+    private func trackHeroZoomDismissalScroll() {
+        guard heroZoomDismissing, let container = heroZoomContainer else { return }
+        let dx = carousel.collectionView.contentOffset.x - heroZoomDismissStartOffsetX
+        container.transform = CGAffineTransform(translationX: -dx, y: 0)
+    }
+
     // MARK: - Media height clamping
 
     /// The Y of the floating toolbar's top — the lower bound the photo region (and,
@@ -779,7 +957,6 @@ final class SortSessionViewController: UIViewController {
             return max(minPhotoHeight, bottomLimit - mediaTop)
         }
         let grabberAndGap: CGFloat = 20 + 6
-        let minAlbumVisible: CGFloat = 200
         let maxH = bottomLimit - mediaTop - grabberAndGap - minAlbumVisible
         return max(minPhotoHeight, min(maxPhotoHeight, maxH))
     }
@@ -1603,6 +1780,107 @@ final class SortSessionViewController: UIViewController {
                 if self?.writeErrorBanner === blur { self?.writeErrorBanner = nil }
             }
         }
+    }
+}
+
+// MARK: - Gesture coexistence
+
+extension SortSessionViewController: UIGestureRecognizerDelegate {
+    /// Let the hero pinch begin even while the carousel's scroll pan is active — the
+    /// pinch handler stops the scroll the moment it takes over.
+    func gestureRecognizer(_ gesture: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        true
+    }
+}
+
+// MARK: - Hero zoom gesture
+
+/// Pinch-and-pan recognizer for the hero zoom. Unlike `UIPinchGestureRecognizer` it
+/// begins only on two fingers — so single-finger carousel scrolling is untouched —
+/// but then keeps tracking all the way down to one finger, so a lifted photo keeps
+/// panning with the single held finger and only ends (springs back) when the *last*
+/// finger lifts. Each event reports the `scale` and centroid `translation` since the
+/// previous one, re-baselined whenever a finger lands or lifts so the touch-count
+/// change never produces a jump; `centroid(in:)` gives the live focal point.
+final class HeroZoomGestureRecognizer: UIGestureRecognizer {
+    /// Multiplicative scale change since the last reported event (1 with a single
+    /// finger, where there are no two points to scale between).
+    private(set) var scale: CGFloat = 1
+    /// Centroid movement since the last reported event, in the recognizer's view.
+    private(set) var translation: CGPoint = .zero
+
+    private var tracked: [UITouch] = []
+    private var lastCentroid: CGPoint = .zero
+    private var lastDistance: CGFloat = 0
+
+    /// Live centroid of the tracked touches in `target`'s coordinate space.
+    func centroid(in target: UIView?) -> CGPoint {
+        guard let target, !tracked.isEmpty else { return .zero }
+        let points = tracked.map { $0.location(in: target) }
+        let sum = points.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
+        return CGPoint(x: sum.x / CGFloat(points.count), y: sum.y / CGFloat(points.count))
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        for touch in touches where tracked.count < 2 { tracked.append(touch) }
+        rebaseline()
+        if tracked.count == 2, state == .possible { state = .began }
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard state == .began || state == .changed else { return }
+        let centroid = currentCentroid()
+        let distance = currentDistance()
+        translation = CGPoint(x: centroid.x - lastCentroid.x, y: centroid.y - lastCentroid.y)
+        scale = (tracked.count == 2 && lastDistance > 0) ? distance / lastDistance : 1
+        lastCentroid = centroid
+        lastDistance = distance
+        state = .changed
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        tracked.removeAll { touches.contains($0) }
+        if tracked.isEmpty {
+            state = (state == .possible) ? .failed : .ended
+        } else {
+            rebaseline()   // dropped two→one: re-anchor so the held finger doesn't jump
+        }
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        tracked.removeAll { touches.contains($0) }
+        if tracked.isEmpty {
+            state = (state == .possible) ? .failed : .cancelled
+        } else {
+            rebaseline()
+        }
+    }
+
+    override func reset() {
+        tracked.removeAll()
+        lastCentroid = .zero
+        lastDistance = 0
+        translation = .zero
+        scale = 1
+    }
+
+    /// Snap the scale/translation baselines to the current touches without emitting a
+    /// delta, so a finger landing or lifting never causes a jump on the next move.
+    private func rebaseline() {
+        lastCentroid = currentCentroid()
+        lastDistance = currentDistance()
+        translation = .zero
+        scale = 1
+    }
+
+    private func currentCentroid() -> CGPoint { centroid(in: view) }
+
+    private func currentDistance() -> CGFloat {
+        guard tracked.count == 2, let view else { return 0 }
+        let a = tracked[0].location(in: view)
+        let b = tracked[1].location(in: view)
+        return hypot(a.x - b.x, a.y - b.y)
     }
 }
 

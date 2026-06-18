@@ -68,6 +68,10 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
     /// Reports the active page's asset id + decoded display image (nil while
     /// loading) for the hero flights.
     var onActiveImage: (String, UIImage?) -> Void = { _, _ in }
+    /// Fired on every scroll change, so the owner can translate a hero-zoom snap-back
+    /// still in flight to follow the carousel — the lifted copy then lands on its page's
+    /// live (scrolled) position instead of a stale center.
+    var onDidScroll: () -> Void = {}
 
     /// Host VC that video cells embed their `AVPlayerViewController` into (as a child
     /// VC, so native transport controls behave correctly). Set by the owning
@@ -137,9 +141,15 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
         return collectionView.convert(rect, to: target)
     }
 
+    /// Tallest the hero page can become (set by the owner). Display images are decoded
+    /// for this height rather than the current one, so shrinking the hero and swiping
+    /// doesn't cache soft, low-res frames that then look blurry once it's enlarged.
+    var maxPageHeight: CGFloat = 0
+
     private var pixelTargetSize: CGSize {
         let scale = collectionView.traitCollection.displayScale > 0 ? collectionView.traitCollection.displayScale : 2
-        return CGSize(width: pageWidth * scale, height: collectionView.bounds.height * scale)
+        let height = max(collectionView.bounds.height, maxPageHeight)
+        return CGSize(width: pageWidth * scale, height: height * scale)
     }
 
     /// Apply the page metrics to the layout; call from the VC's layout pass.
@@ -369,6 +379,9 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
     /// preview strip's selection — without committing the VM or scrolling the
     /// carousel, so the drag is never interrupted. The commit happens on settle.
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        // Fired for every offset change (including the unguarded cases below) so a
+        // hero-zoom snap-back can ride the scroll.
+        onDidScroll()
         guard !isProgrammaticScroll,
               scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating,
               !assetIDs.isEmpty else { return }
