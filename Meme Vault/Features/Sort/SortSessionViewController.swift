@@ -141,7 +141,13 @@ final class SortSessionViewController: UIViewController {
     // blurred backdrop as a placeholder while the sharp copy is lifted.
     private var heroZoomView: UIImageView?
     private var heroZoomScrim: UIView?
+    /// Holds the lifted copy; during the snap-back it's translated to track carousel
+    /// scrolling so the copy rides its page home instead of springing to a stale center.
+    private var heroZoomContainer: UIView?
     private var heroZoomStartCenter: CGPoint = .zero
+    /// Carousel content offset captured when the snap-back begins, so scroll since then
+    /// drives the container's translation.
+    private var heroZoomDismissStartOffsetX: CGFloat = 0
     /// True while the lifted copy is springing back, so a re-pinch over the snap-back
     /// is ignored rather than fighting (and being torn down by) the in-flight animation.
     private var heroZoomDismissing = false
@@ -523,7 +529,7 @@ final class SortSessionViewController: UIViewController {
             self?.heroImageID = id
             self?.heroImage = image
         }
-        carousel.onWillBeginDragging = { [weak self] in self?.interruptHeroZoomDismissal() }
+        carousel.onDidScroll = { [weak self] in self?.trackHeroZoomDismissalScroll() }
         morph.onTap = { [weak self] id in
             guard let self else { return }
             if self.vm.isBulkMode { self.vm.toggleBulkSelection(id) } else { self.vm.showAsset(id: id) }
@@ -814,10 +820,20 @@ final class SortSessionViewController: UIViewController {
         albumFlightOverlay.addSubview(scrim)
         heroZoomScrim = scrim
 
+        // The copy rides in a container matching the overlay (identity transform during
+        // the pinch, so the focal math below is unchanged). The snap-back springs the
+        // copy home *within* the container while the container translates with carousel
+        // scroll, landing the copy on its page's live position.
+        let container = UIView(frame: albumFlightOverlay.bounds)
+        container.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        container.isUserInteractionEnabled = false
+        albumFlightOverlay.addSubview(container)
+        heroZoomContainer = container
+
         let zoom = UIImageView(image: image)
         zoom.contentMode = .scaleAspectFit
         zoom.frame = startRect
-        albumFlightOverlay.addSubview(zoom)
+        container.addSubview(zoom)
         heroZoomView = zoom
 
         heroZoomStartCenter = CGPoint(x: startRect.midX, y: startRect.midY)
@@ -847,8 +863,8 @@ final class SortSessionViewController: UIViewController {
     }
 
     private func endHeroZoom() {
-        // A dismissal is already springing back — ignore a stray end from a gesture
-        // that began over the snap-back.
+        // A snap-back is already in flight — ignore a stray end from a gesture that
+        // began over it.
         guard !heroZoomDismissing else { return }
         carousel.collectionView.isScrollEnabled = true
         guard let zoom = heroZoomView else {
@@ -858,14 +874,16 @@ final class SortSessionViewController: UIViewController {
             return
         }
         heroZoomDismissing = true
+        // Reference offset for scroll tracking: any carousel scroll from here translates
+        // the container so the copy rides its page (see trackHeroZoomDismissalScroll).
+        heroZoomDismissStartOffsetX = carousel.collectionView.contentOffset.x
         let scrim = heroZoomScrim
         let restore = {
             zoom.transform = .identity
             zoom.center = self.heroZoomStartCenter
             scrim?.alpha = 0
         }
-        // Reveal the page's real foreground under the now-aligned copy, then drop it —
-        // unless an interrupt (carousel drag) already took the copy over.
+        // Reveal the page's real foreground under the now-aligned copy, then drop it.
         let finish = { [weak self] in
             guard let self, self.heroZoomDismissing else { return }
             self.carousel.suppressForeground = false
@@ -884,44 +902,21 @@ final class SortSessionViewController: UIViewController {
     private func teardownHeroZoom() {
         heroZoomView?.removeFromSuperview()
         heroZoomView = nil
+        heroZoomContainer?.removeFromSuperview()
+        heroZoomContainer = nil
         heroZoomScrim?.removeFromSuperview()
         heroZoomScrim = nil
         heroZoomDismissing = false
     }
 
-    /// The carousel started scrolling while the copy was still springing back: freeze
-    /// the copy where it is and dissolve it (revealing the real page now), so the drag
-    /// stays smooth instead of the copy settling to center and then jumping with the
-    /// scroll.
-    private func interruptHeroZoomDismissal() {
-        guard heroZoomDismissing, let zoom = heroZoomView else { return }
-        let scrim = heroZoomScrim
-        // Detach from the session first, so the now-cancelled spring's completion and
-        // any fresh pinch leave these locals alone.
-        heroZoomDismissing = false
-        heroZoomView = nil
-        heroZoomScrim = nil
-        // Adopt the spring's current on-screen state before cancelling it, so stopping
-        // mid-flight doesn't snap the copy to center.
-        if let presentation = zoom.layer.presentation() {
-            zoom.transform = CATransform3DGetAffineTransform(presentation.transform)
-            zoom.center = presentation.position
-        }
-        zoom.layer.removeAllAnimations()
-        if let presentation = scrim?.layer.presentation() {
-            scrim?.alpha = CGFloat(presentation.opacity)
-        }
-        scrim?.layer.removeAllAnimations()
-        // The real page shows through immediately (already scrolling); fade the copy
-        // out over it rather than flying it home.
-        carousel.suppressForeground = false
-        UIView.animate(withDuration: 0.18, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
-            zoom.alpha = 0
-            scrim?.alpha = 0
-        } completion: { _ in
-            zoom.removeFromSuperview()
-            scrim?.removeFromSuperview()
-        }
+    /// While the snap-back is in flight, translate the container by however far the
+    /// carousel has scrolled since it began, so the copy rides its page and lands on the
+    /// page's live position — the spring still shrinks it home, but the home target
+    /// moves with the scroll, so there's no settle-to-center then jump and no fade.
+    private func trackHeroZoomDismissalScroll() {
+        guard heroZoomDismissing, let container = heroZoomContainer else { return }
+        let dx = carousel.collectionView.contentOffset.x - heroZoomDismissStartOffsetX
+        container.transform = CGAffineTransform(translationX: -dx, y: 0)
     }
 
     // MARK: - Media height clamping

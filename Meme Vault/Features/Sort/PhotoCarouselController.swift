@@ -68,10 +68,10 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
     /// Reports the active page's asset id + decoded display image (nil while
     /// loading) for the hero flights.
     var onActiveImage: (String, UIImage?) -> Void = { _, _ in }
-    /// Fired when the user starts dragging the carousel, so the owner can interrupt a
-    /// hero-zoom snap-back still in flight (otherwise the lifted copy settles to center
-    /// while the drag scrolls underneath, then jumps to the scrolled page).
-    var onWillBeginDragging: () -> Void = {}
+    /// Fired on every scroll change, so the owner can translate a hero-zoom snap-back
+    /// still in flight to follow the carousel — the lifted copy then lands on its page's
+    /// live (scrolled) position instead of a stale center.
+    var onDidScroll: () -> Void = {}
 
     /// Host VC that video cells embed their `AVPlayerViewController` into (as a child
     /// VC, so native transport controls behave correctly). Set by the owning
@@ -368,15 +368,14 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
         targetContentOffset.pointee = CGPoint(x: page * pageStride, y: 0)
     }
 
-    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
-        onWillBeginDragging()
-    }
-
     /// Live page tracking: the moment the scroll crosses the 50% mark toward the
     /// next page (`centeredIndex` rounds at the halfway point), move *only* the
     /// preview strip's selection — without committing the VM or scrolling the
     /// carousel, so the drag is never interrupted. The commit happens on settle.
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        // Fired for every offset change (including the unguarded cases below) so a
+        // hero-zoom snap-back can ride the scroll.
+        onDidScroll()
         guard !isProgrammaticScroll,
               scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating,
               !assetIDs.isEmpty else { return }
