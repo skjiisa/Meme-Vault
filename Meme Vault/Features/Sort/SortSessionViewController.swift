@@ -108,15 +108,23 @@ final class SortSessionViewController: UIViewController {
     private let columnGrabber = UIView()
     private var dragStartLeftWidth: CGFloat?
 
-    // Resize state
+    // Resize state. Hero height (the media region) ranges over [minPhotoHeight,
+    // maxPhotoHeight], minus `MorphController.stripBandHeight` (44) of preview strip —
+    // so the photo itself spans ~96pt…~516pt. Detail viewing is handled by pinch-zoom,
+    // so this grabber is about layout balance (photo vs album grid), not inspection.
     private var photoHeight: CGFloat = 300
     private var dragStartHeight: CGFloat?
     private var wasInNotch = false
-    private let minPhotoHeight: CGFloat = 120
-    private let maxPhotoHeight: CGFloat = 500
-    private let defaultPhotoHeight: CGFloat = 300
+    private let minPhotoHeight: CGFloat = 160
+    private let maxPhotoHeight: CGFloat = 560
+    private let defaultPhotoHeight: CGFloat = 320
     private let notchRadius: CGFloat = 30
     private let notchDamping: CGFloat = 0.25
+    /// Album grid kept on screen (single-column layout) when the hero is dragged to its
+    /// tallest, so growing the photo never fully hides the destinations. On most iPhones
+    /// this — not `maxPhotoHeight` — is what caps the hero height; the ceiling only binds
+    /// on large screens / iPad.
+    private let minAlbumVisible: CGFloat = 140
 
     // Column count for the album grid.
     private var columnCount = 3
@@ -211,7 +219,7 @@ final class SortSessionViewController: UIViewController {
         morph.gridColumns = photoColumnCount
         morph.gridBottomInset = photoZoomBarClearance
         if let stored = UserDefaults.standard.object(forKey: photoHeightKey) as? Double {
-            photoHeight = CGFloat(stored)
+            photoHeight = min(maxPhotoHeight, max(minPhotoHeight, CGFloat(stored)))
         }
         if let storedFraction = UserDefaults.standard.object(forKey: splitFractionKey) as? Double {
             regularLeftFraction = min(0.7, max(0.3, CGFloat(storedFraction)))
@@ -941,7 +949,6 @@ final class SortSessionViewController: UIViewController {
             return max(minPhotoHeight, bottomLimit - mediaTop)
         }
         let grabberAndGap: CGFloat = 20 + 6
-        let minAlbumVisible: CGFloat = 200
         let maxH = bottomLimit - mediaTop - grabberAndGap - minAlbumVisible
         return max(minPhotoHeight, min(maxPhotoHeight, maxH))
     }
