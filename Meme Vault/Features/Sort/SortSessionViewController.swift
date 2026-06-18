@@ -514,6 +514,7 @@ final class SortSessionViewController: UIViewController {
             guard let self else { return }
             if self.vm.isBulkMode { self.vm.toggleBulkSelection(id) } else { self.vm.showAsset(id: id) }
         }
+        morph.onDragSelectionChanged = { [weak self] ids in self?.vm.setBulkSelection(ids) }
         album.onTap = { [weak self] group, albumID in self?.handleAlbumTap(group: group, albumID: albumID) }
         album.onViewContents = { [weak self] id, title in self?.onViewAlbum(id, title) }
 

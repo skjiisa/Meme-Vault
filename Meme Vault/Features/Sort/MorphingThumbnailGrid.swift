@@ -29,6 +29,7 @@
 //
 
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
 import Photos
 
 /// Drives the morphing strip/grid collection view. Created and owned by
@@ -47,6 +48,9 @@ final class MorphController: NSObject, UICollectionViewDelegate, UICollectionVie
 
     /// Tap handler — toggles bulk selection or shows the asset, per the VC.
     var onTap: (String) -> Void = { _ in }
+    /// Delivers the full target selection during a single-finger drag-select
+    /// (bulk mode); the VC pushes it straight to the view model.
+    var onDragSelectionChanged: (Set<String>) -> Void = { _ in }
     /// The flight overlay (above the carousel) the hero-zoom image is added to.
     weak var flightOverlay: UIView?
     /// Full-aspect display image of the current hero photo, used as the zoom
@@ -72,6 +76,25 @@ final class MorphController: NSObject, UICollectionViewDelegate, UICollectionVie
     /// Static copy of the current item's strip thumbnail that fades in/out in
     /// place (so it doesn't move while the real cell morphs strip↔grid).
     private var stripProxy: UIImageView?
+
+    // MARK: Drag-select state
+    private var selectPan: UIPanGestureRecognizer!
+    /// Index where the active drag began; nil when no drag is in progress.
+    private var dragAnchorIndex: Int?
+    /// Whether the drag paints selection (true) or deselection (false), fixed at
+    /// the anchor cell's pre-drag state — mirrors Photos.
+    private var dragSelecting = false
+    /// Selection as it was when the drag began, so cells leaving the swept range
+    /// revert instead of sticking selected.
+    private var preDragSelection: Set<String> = []
+    /// Last item index the finger was over, to tick feedback once per crossed cell.
+    private var dragLastIndex: Int?
+    /// Finger position in the collection view's *viewport* (bounds) space, kept so
+    /// edge auto-scroll can re-resolve the swept cell as content slides under it.
+    private var dragViewportPoint: CGPoint = .zero
+    private let selectionFeedback = UISelectionFeedbackGenerator()
+    private var autoScrollLink: CADisplayLink?
+    private var autoScrollStep: CGFloat = 0
 
     private static let flightDuration: TimeInterval = 0.3
     private static let revealFadeDuration: TimeInterval = 0.25
@@ -111,7 +134,21 @@ final class MorphController: NSObject, UICollectionViewDelegate, UICollectionVie
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { cv, indexPath, id in
             cv.dequeueConfiguredReusableCell(using: registration, for: indexPath, item: id)
         }
+
+        // Single-finger drag-to-select (bulk only): a horizontal-start pan selects a
+        // run of photos and, dragged down, fills whole rows — like Photos. Vertical
+        // starts fall through to the grid's own scroll. Disabled in browse, where a
+        // horizontal pan scrolls the strip.
+        let pan = HorizontalDragSelectGestureRecognizer(target: self, action: #selector(handleSelectPan(_:)))
+        pan.maximumNumberOfTouches = 1
+        pan.isEnabled = false
+        collectionView.addGestureRecognizer(pan)
+        // The grid's vertical scroll yields to a committed horizontal drag-select.
+        collectionView.panGestureRecognizer.require(toFail: pan)
+        selectPan = pan
     }
+
+    deinit { autoScrollLink?.invalidate() }
 
     // MARK: - Snapshot / state
 
@@ -238,6 +275,7 @@ final class MorphController: NSObject, UICollectionViewDelegate, UICollectionVie
         onFlightComplete: @escaping (Bool) -> Void
     ) {
         isBulkMode = true
+        selectPan.isEnabled = true
         collectionView.showsVerticalScrollIndicator = true
         // Clip the grid to its frame so scrolled rows stop at the media-region
         // bottom (above the drag handle) instead of bleeding over the destination
@@ -266,6 +304,8 @@ final class MorphController: NSObject, UICollectionViewDelegate, UICollectionVie
         onFlightComplete: @escaping (Bool) -> Void
     ) {
         isBulkMode = false
+        selectPan.isEnabled = false
+        endDragSelect()
         collectionView.showsVerticalScrollIndicator = false
         collectionView.clipsToBounds = false
         runHeroFlight(entering: false, mediaRegionBounds: mediaRegionBounds, onFlightComplete: onFlightComplete)
@@ -444,6 +484,123 @@ final class MorphController: NSObject, UICollectionViewDelegate, UICollectionVie
         return CGRect(x: bounds.midX - w / 2, y: bounds.midY - h / 2, width: w, height: h)
     }
 
+    // MARK: - Drag-select
+
+    @objc private func handleSelectPan(_ g: UIPanGestureRecognizer) {
+        let point = g.location(in: collectionView)
+        switch g.state {
+        case .began:   beginDragSelect(at: point)
+        case .changed: updateDragSelect(at: point)
+        case .ended, .cancelled, .failed: endDragSelect()
+        default: break
+        }
+    }
+
+    private func beginDragSelect(at contentPoint: CGPoint) {
+        guard isBulkMode, let idx = itemIndex(at: contentPoint) else {
+            dragAnchorIndex = nil
+            return
+        }
+        dragAnchorIndex = idx
+        // Start on an unselected cell → the drag selects; on a selected cell → it
+        // deselects. Either way the swept range is forced to this mode.
+        dragSelecting = !selectedIDs.contains(assetIDs[idx])
+        preDragSelection = selectedIDs
+        dragLastIndex = idx
+        selectionFeedback.prepare()
+        selectionFeedback.selectionChanged()
+        applyRange(to: idx)
+    }
+
+    private func updateDragSelect(at contentPoint: CGPoint) {
+        guard dragAnchorIndex != nil else { return }
+        dragViewportPoint = CGPoint(x: contentPoint.x,
+                                    y: contentPoint.y - collectionView.contentOffset.y)
+        sweep(to: contentPoint)
+        updateAutoScroll(viewportY: dragViewportPoint.y)
+    }
+
+    private func endDragSelect() {
+        stopAutoScroll()
+        dragAnchorIndex = nil
+        dragLastIndex = nil
+        preDragSelection = []
+    }
+
+    /// Resolve the cell under `contentPoint` and, if it changed, tick feedback and
+    /// repaint the swept range.
+    private func sweep(to contentPoint: CGPoint) {
+        guard let idx = itemIndex(at: contentPoint) else { return }
+        guard idx != dragLastIndex else { return }
+        dragLastIndex = idx
+        selectionFeedback.selectionChanged()
+        applyRange(to: idx)
+    }
+
+    /// Force every cell between the anchor and `current` to the drag's paint mode,
+    /// leaving all others at their pre-drag state, then push the result.
+    private func applyRange(to current: Int) {
+        guard let anchor = dragAnchorIndex else { return }
+        let lo = min(anchor, current), hi = max(anchor, current)
+        var target = preDragSelection
+        for i in lo...hi where i < assetIDs.count {
+            let id = assetIDs[i]
+            if dragSelecting { target.insert(id) } else { target.remove(id) }
+        }
+        guard target != selectedIDs else { return }
+        updateSelection(target)          // immediate repaint of the changed cells
+        onDragSelectionChanged(target)   // view model = source of truth
+    }
+
+    private func itemIndex(at contentPoint: CGPoint) -> Int? {
+        if let ip = collectionView.indexPathForItem(at: contentPoint) { return ip.item }
+        return (collectionView.collectionViewLayout as? MorphLayout)?
+            .gridItemIndex(atContentPoint: contentPoint, itemCount: assetIDs.count)
+    }
+
+    // MARK: - Drag-select auto-scroll
+
+    /// Scroll the grid when the finger nears the top/bottom edge so a drag can
+    /// extend selection beyond the visible rows. `viewportY` is measured from the
+    /// collection view's top.
+    private func updateAutoScroll(viewportY: CGFloat) {
+        let edge: CGFloat = 80
+        let maxStep: CGFloat = 14
+        let top = collectionView.adjustedContentInset.top
+        let bottom = collectionView.bounds.height - collectionView.adjustedContentInset.bottom
+        var step: CGFloat = 0
+        if viewportY < top + edge {
+            step = -maxStep * min(1, (top + edge - viewportY) / edge)
+        } else if viewportY > bottom - edge {
+            step = maxStep * min(1, (viewportY - (bottom - edge)) / edge)
+        }
+        autoScrollStep = step
+        if step == 0 {
+            stopAutoScroll()
+        } else if autoScrollLink == nil {
+            let link = CADisplayLink(target: self, selector: #selector(autoScrollTick))
+            link.add(to: .main, forMode: .common)
+            autoScrollLink = link
+        }
+    }
+
+    @objc private func autoScrollTick() {
+        let minY = -collectionView.adjustedContentInset.top
+        let maxY = max(minY, collectionView.contentSize.height
+                       - collectionView.bounds.height + collectionView.adjustedContentInset.bottom)
+        let newY = min(maxY, max(minY, collectionView.contentOffset.y + autoScrollStep))
+        guard newY != collectionView.contentOffset.y else { return }   // hit the end
+        collectionView.contentOffset.y = newY
+        // The finger is stationary in the viewport; re-resolve the cell now under it.
+        sweep(to: CGPoint(x: dragViewportPoint.x, y: dragViewportPoint.y + newY))
+    }
+
+    private func stopAutoScroll() {
+        autoScrollLink?.invalidate()
+        autoScrollLink = nil
+        autoScrollStep = 0
+    }
+
     // MARK: - Delegate
 
     func collectionView(_ cv: UICollectionView, didSelectItemAt indexPath: IndexPath) {
@@ -537,6 +694,64 @@ final class MorphLayout: UICollectionViewLayout {
 
     override func shouldInvalidateLayout(forBoundsChange newBounds: CGRect) -> Bool {
         collectionView?.bounds.size != newBounds.size
+    }
+
+    /// Map a content-space point to an item index in grid mode, clamping into the
+    /// grid so a drag in the padding, inter-cell gaps, or past the last row still
+    /// resolves to a row + column. Used by drag-select where `indexPathForItem`
+    /// returns nil. Nil in strip mode or when empty.
+    func gridItemIndex(atContentPoint point: CGPoint, itemCount: Int) -> Int? {
+        guard mode == .grid, itemCount > 0, let cv = collectionView else { return nil }
+        let usable = cv.bounds.width - 2 * horizontalPadding - CGFloat(columns - 1) * gridSpacing
+        let cell = max(1, floor(usable / CGFloat(columns)))
+        let stride = cell + gridSpacing
+        let top = gridTopInset + gridSpacing
+        let col = min(columns - 1, max(0, Int(floor((point.x - horizontalPadding) / stride))))
+        let row = max(0, Int(floor((point.y - top) / stride)))
+        return min(itemCount - 1, max(0, row * columns + col))
+    }
+}
+
+// MARK: - Drag-select gesture
+
+/// A single-finger pan that commits only when the initial movement is clearly
+/// horizontal; a vertical-dominant start fails the recognizer so the collection
+/// view's own vertical scroll takes over. This lets a horizontal swipe begin a
+/// Photos-style drag-to-select while ordinary vertical drags still scroll.
+final class HorizontalDragSelectGestureRecognizer: UIPanGestureRecognizer {
+    /// Points of travel before the horizontal-vs-vertical decision is made. Also
+    /// the dead zone before a vertical scroll engages (the grid's scroll waits for
+    /// this recognizer to fail), so keep it small.
+    private let decisionThreshold: CGFloat = 10
+    private var startLocation: CGPoint = .zero
+    private var decided = false
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesBegan(touches, with: event)
+        startLocation = touches.first?.location(in: view) ?? .zero
+        decided = false
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        // Until the direction is decided, withhold the base recognizer so it can't
+        // begin on a vertical drag; decide once enough travel accumulates.
+        if !decided, let p = touches.first?.location(in: view) {
+            let dx = p.x - startLocation.x, dy = p.y - startLocation.y
+            guard abs(dx) + abs(dy) >= decisionThreshold else { return }
+            decided = true
+            if abs(dy) > abs(dx) {
+                state = .failed          // vertical → hand off to the grid's scroll
+                return
+            }
+            // horizontal → let the base recognizer drive into .began below
+        }
+        super.touchesMoved(touches, with: event)
+    }
+
+    override func reset() {
+        super.reset()
+        decided = false
+        startLocation = .zero
     }
 }
 

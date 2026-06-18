@@ -761,6 +761,12 @@ final class SortSessionViewModel {
         Haptics.tap()
     }
 
+    /// Replace the whole bulk selection — used by the grid's drag-select, which
+    /// computes the swept range itself and provides its own per-cell haptics.
+    func setBulkSelection(_ ids: Set<String>) {
+        bulkSelectedIDs = ids
+    }
+
     /// An album tap in bulk mode. With photos selected it sorts them straight to
     /// the album; with nothing selected yet it enters destination multi-select and
     /// pends the album, so you can pick destinations first, then the photos.
