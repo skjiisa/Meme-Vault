@@ -68,6 +68,10 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
     /// Reports the active page's asset id + decoded display image (nil while
     /// loading) for the hero flights.
     var onActiveImage: (String, UIImage?) -> Void = { _, _ in }
+    /// Fired when the user starts dragging the carousel, so the owner can interrupt a
+    /// hero-zoom snap-back still in flight (otherwise the lifted copy settles to center
+    /// while the drag scrolls underneath, then jumps to the scrolled page).
+    var onWillBeginDragging: () -> Void = {}
 
     /// Host VC that video cells embed their `AVPlayerViewController` into (as a child
     /// VC, so native transport controls behave correctly). Set by the owning
@@ -362,6 +366,10 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
         }
         page = max(0, min(CGFloat(assetIDs.count - 1), page))
         targetContentOffset.pointee = CGPoint(x: page * pageStride, y: 0)
+    }
+
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        onWillBeginDragging()
     }
 
     /// Live page tracking: the moment the scroll crosses the 50% mark toward the

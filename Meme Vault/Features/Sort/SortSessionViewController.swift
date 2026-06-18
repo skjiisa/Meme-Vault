@@ -523,6 +523,7 @@ final class SortSessionViewController: UIViewController {
             self?.heroImageID = id
             self?.heroImage = image
         }
+        carousel.onWillBeginDragging = { [weak self] in self?.interruptHeroZoomDismissal() }
         morph.onTap = { [weak self] id in
             guard let self else { return }
             if self.vm.isBulkMode { self.vm.toggleBulkSelection(id) } else { self.vm.showAsset(id: id) }
@@ -863,10 +864,12 @@ final class SortSessionViewController: UIViewController {
             zoom.center = self.heroZoomStartCenter
             scrim?.alpha = 0
         }
-        // Reveal the page's real foreground under the now-aligned copy, then drop it.
+        // Reveal the page's real foreground under the now-aligned copy, then drop it —
+        // unless an interrupt (carousel drag) already took the copy over.
         let finish = { [weak self] in
-            self?.carousel.suppressForeground = false
-            self?.teardownHeroZoom()
+            guard let self, self.heroZoomDismissing else { return }
+            self.carousel.suppressForeground = false
+            self.teardownHeroZoom()
         }
         if UIAccessibility.isReduceMotionEnabled {
             UIView.animate(withDuration: 0.2, animations: restore) { _ in finish() }
@@ -884,6 +887,41 @@ final class SortSessionViewController: UIViewController {
         heroZoomScrim?.removeFromSuperview()
         heroZoomScrim = nil
         heroZoomDismissing = false
+    }
+
+    /// The carousel started scrolling while the copy was still springing back: freeze
+    /// the copy where it is and dissolve it (revealing the real page now), so the drag
+    /// stays smooth instead of the copy settling to center and then jumping with the
+    /// scroll.
+    private func interruptHeroZoomDismissal() {
+        guard heroZoomDismissing, let zoom = heroZoomView else { return }
+        let scrim = heroZoomScrim
+        // Detach from the session first, so the now-cancelled spring's completion and
+        // any fresh pinch leave these locals alone.
+        heroZoomDismissing = false
+        heroZoomView = nil
+        heroZoomScrim = nil
+        // Adopt the spring's current on-screen state before cancelling it, so stopping
+        // mid-flight doesn't snap the copy to center.
+        if let presentation = zoom.layer.presentation() {
+            zoom.transform = CATransform3DGetAffineTransform(presentation.transform)
+            zoom.center = presentation.position
+        }
+        zoom.layer.removeAllAnimations()
+        if let presentation = scrim?.layer.presentation() {
+            scrim?.alpha = CGFloat(presentation.opacity)
+        }
+        scrim?.layer.removeAllAnimations()
+        // The real page shows through immediately (already scrolling); fade the copy
+        // out over it rather than flying it home.
+        carousel.suppressForeground = false
+        UIView.animate(withDuration: 0.18, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+            zoom.alpha = 0
+            scrim?.alpha = 0
+        } completion: { _ in
+            zoom.removeFromSuperview()
+            scrim?.removeFromSuperview()
+        }
     }
 
     // MARK: - Media height clamping
