@@ -141,9 +141,15 @@ final class PhotoCarouselController: NSObject, UICollectionViewDataSourcePrefetc
         return collectionView.convert(rect, to: target)
     }
 
+    /// Tallest the hero page can become (set by the owner). Display images are decoded
+    /// for this height rather than the current one, so shrinking the hero and swiping
+    /// doesn't cache soft, low-res frames that then look blurry once it's enlarged.
+    var maxPageHeight: CGFloat = 0
+
     private var pixelTargetSize: CGSize {
         let scale = collectionView.traitCollection.displayScale > 0 ? collectionView.traitCollection.displayScale : 2
-        return CGSize(width: pageWidth * scale, height: collectionView.bounds.height * scale)
+        let height = max(collectionView.bounds.height, maxPageHeight)
+        return CGSize(width: pageWidth * scale, height: height * scale)
     }
 
     /// Apply the page metrics to the layout; call from the VC's layout pass.

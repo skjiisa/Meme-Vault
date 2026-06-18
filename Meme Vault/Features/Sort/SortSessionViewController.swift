@@ -519,6 +519,11 @@ final class SortSessionViewController: UIViewController {
         grabberHeightConstraint.constant = regular ? 0 : 20
         resizeGrabber.isHidden = regular
         columnGrabber.isHidden = !regular
+        // The carousel is full width in single column, so its own clip is redundant
+        // (off-screen peeks are window-clipped) and would catch the hero card's rounded
+        // top corners during the resize spring — let it not clip there. Two pane keeps
+        // clipping so peeks don't bleed past the column divider into the album grid.
+        carousel.collectionView.clipsToBounds = regular
         // A size-class flip can land mid hero-flight (entering/exiting bulk); make
         // sure the carousel is never left with its foreground suppressed (blank).
         heroForegroundSuppressed = false
@@ -529,6 +534,9 @@ final class SortSessionViewController: UIViewController {
 
     private func wireRegions() {
         carousel.hostViewController = self
+        // Decode hero stills for the tallest the region can get, so a small-preview swipe
+        // doesn't cache low-res frames that blur when the hero is later dragged bigger.
+        carousel.maxPageHeight = maxPhotoHeight - MorphController.stripBandHeight
         carousel.onShowAsset = { [weak self] id in self?.vm.showAsset(id: id) }
         // Mid-drag the carousel only nudges the strip's selection — no VM commit —
         // so the album grid / current photo stay put and the drag isn't interrupted.
