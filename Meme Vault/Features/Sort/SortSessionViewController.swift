@@ -514,6 +514,7 @@ final class SortSessionViewController: UIViewController {
             guard let self else { return }
             if self.vm.isBulkMode { self.vm.toggleBulkSelection(id) } else { self.vm.showAsset(id: id) }
         }
+        morph.onDragSelectionChanged = { [weak self] ids in self?.vm.setBulkSelection(ids) }
         album.onTap = { [weak self] group, albumID in self?.handleAlbumTap(group: group, albumID: albumID) }
         album.onViewContents = { [weak self] id, title in self?.onViewAlbum(id, title) }
 
@@ -538,13 +539,25 @@ final class SortSessionViewController: UIViewController {
         button(deleteButton, "trash", "Move to Trash") { [weak self] in
             guard let self else { return }
             self.commitVisiblePhotoIfBrowsing()
-            Task { self.vm.isBulkMode ? await self.vm.bulkQueueDelete() : await self.vm.queueDelete() }
+            Task { @MainActor in
+                guard !self.vm.isBulkMode else { await self.vm.bulkQueueDelete(); return }
+                if self.flyHeroToButton(self.deleteButton, heroID: self.vm.currentAssetID) {
+                    self.vm.noteHeroFlightDeparture(self.vm.currentAssetID)
+                }
+                await self.vm.queueDelete()
+            }
         }
         deleteButton.tintColor = .systemRed
         button(skipButton, "arrow.right.to.line", "Skip") { [weak self] in
             guard let self else { return }
             self.commitVisiblePhotoIfBrowsing()
-            Task { self.vm.isBulkMode ? await self.vm.bulkSkip() : await self.vm.skip() }
+            Task { @MainActor in
+                guard !self.vm.isBulkMode else { await self.vm.bulkSkip(); return }
+                if self.flyHeroToButton(self.skipButton, heroID: self.vm.currentAssetID) {
+                    self.vm.noteHeroFlightDeparture(self.vm.currentAssetID)
+                }
+                await self.vm.skip()
+            }
         }
         button(favoriteButton, "heart", "Favorite") { [weak self] in
             guard let self else { return }
@@ -1280,6 +1293,69 @@ final class SortSessionViewController: UIViewController {
             UIView.animate(withDuration: 0.12, delay: 0, options: [.curveEaseOut]) {
                 fv.alpha = 0
             } completion: { _ in fv.removeFromSuperview() }
+        }
+        return true
+    }
+
+    // MARK: - Hero → control-button flight
+
+    /// Fly the hero photo into a control-bar button (trash / skip), mirroring the
+    /// hero → album flight: the carousel page blanks (the flight draws the photo)
+    /// while a copy shrinks and dissolves into the button. Unlike an album slot
+    /// there's nowhere for it to land, so it fades out as it reaches the button
+    /// and the button pulses to acknowledge it. Returns true if it launched, so
+    /// the caller marks the hero departure.
+    @discardableResult
+    private func flyHeroToButton(_ button: UIButton, heroID: String?) -> Bool {
+        // Reduce Motion: skip the decorative flight; the sort still happens via the
+        // VM. Returning false tells the caller not to mark a hero departure (which
+        // would blank the page awaiting a flight that never runs).
+        guard !UIAccessibility.isReduceMotionEnabled else { return false }
+        guard let heroID, view.window != nil,
+              let pageRect = carouselPageRect(in: albumFlightOverlay)
+        else { return false }
+
+        let displayImage = heroImageID == heroID ? heroImage : nil
+        let scale = view.traitCollection.displayScale > 0 ? view.traitCollection.displayScale : 2
+        let thumbSide = 80 * scale
+        let image = displayImage ?? ImageLoader.shared.cachedThumbnail(
+            localID: heroID, targetSize: CGSize(width: thumbSide, height: thumbSide))
+        guard let image else { return false }
+
+        let target = button.convert(button.bounds, to: albumFlightOverlay)
+        guard albumFlightOverlay.bounds.intersects(target) else { return false }
+        let from = displayImage != nil ? Self.aspectFitRect(for: image.size, in: pageRect) : pageRect
+
+        let fv = UIImageView(image: image)
+        fv.contentMode = .scaleAspectFill
+        fv.clipsToBounds = true
+        fv.frame = from
+        albumFlightOverlay.addSubview(fv)
+
+        let corner = CABasicAnimation(keyPath: "cornerRadius")
+        corner.fromValue = 0
+        corner.toValue = 6
+        corner.duration = 0.28
+        corner.timingFunction = CAMediaTimingFunction(name: .easeIn)
+        fv.layer.add(corner, forKey: "cornerRadius")
+        fv.layer.cornerRadius = 6
+
+        // Ease-in so the photo lingers large then accelerates as it shrinks into
+        // the button, fading out just as it arrives.
+        UIView.animate(withDuration: 0.28, delay: 0, options: [.curveEaseIn]) {
+            fv.frame = target
+            fv.alpha = 0
+        } completion: { _ in fv.removeFromSuperview() }
+
+        // Pulse the button so the photo visibly drops into it, timed to land as the
+        // flight arrives.
+        UIView.animateKeyframes(withDuration: 0.26, delay: 0.16, options: [.calculationModeCubic]) {
+            UIView.addKeyframe(withRelativeStartTime: 0, relativeDuration: 0.5) {
+                button.transform = CGAffineTransform(scaleX: 1.2, y: 1.2)
+            }
+            UIView.addKeyframe(withRelativeStartTime: 0.5, relativeDuration: 0.5) {
+                button.transform = .identity
+            }
         }
         return true
     }
